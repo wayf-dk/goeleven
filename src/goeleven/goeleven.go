@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/wayf-dk/pkcs11"
 	"io/ioutil"
 	"net/http"
 	"os"
-	"github.com/wayf-dk/pkcs11"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -20,12 +22,6 @@ type Hsm struct {
 	started time.Time
 }
 
-const (
-	minsessions   = 1
-	maxsessions   = 1
-	maxsessionage = 1000000
-)
-
 var currentsessions int
 var hsm1 Hsm
 var sem chan Hsm
@@ -33,12 +29,19 @@ var pguard sync.Mutex
 var p *pkcs11.Ctx
 var config = map[string]string{
 	"GOELEVEN_HSMLIB":        "",
-	"GOELEVEN_PORT":          "",
-	"GOELEVEN_INTERFACE":     "localhost",
+	"GOELEVEN_INTERFACE":     "localhost:8080",
 	"GOELEVEN_SLOT":          "",
 	"GOELEVEN_SLOT_PASSWORD": "",
 	"GOELEVEN_KEY_LABEL":     "",
+	"GOELEVEN_SHAREDSECRET":  "",
+	"GOELEVEN_MINSESSIONS":   "1",
+	"GOELEVEN_MAXSESSIONS":   "1",
+	"GOELEVEN_MAXSESSIONAGE": "1000000",
 	"SOFTHSM_CONF":           "softhsm.conf",
+}
+var xauthlen = map[string]int{
+	"min": 12,
+	"max": 32,
 }
 var flagDebug = true
 
@@ -50,9 +53,8 @@ func main() {
 	p.Initialize()
 	go handlesessions()
 	http.HandleFunc("/", handler)
-	http.ListenAndServe(config["GOELEVEN_INTERFACE"]+":"+config["GOELEVEN_PORT"], nil)
+	http.ListenAndServe(config["GOELEVEN_INTERFACE"], nil)
 }
-
 
 // initConfig read several Environment variables and based on them initialise the configuration
 func initConfig() {
@@ -66,6 +68,14 @@ func initConfig() {
 	}
 	// All variable MUST have a value but we can not verify the variable content
 	for k, _ := range config {
+		if isdebug() {
+			// Don't write PASSWORD to debug
+			if k == "GOELEVEN_SLOT_PASSWORD" {
+				debug(fmt.Sprintf("%v: xxxxxx\n", k))
+			} else {
+				debug(fmt.Sprintf("%v: %v\n", k, config[k]))
+			}
+		}
 		if config[k] == "" {
 			exit(fmt.Sprintf("Problem with %s", k), 2)
 		}
@@ -78,9 +88,17 @@ func initConfig() {
 			exit(fmt.Sprintf("%s %s", v, err.Error()), 2)
 		}
 	}
+	// Test XAUTH enviroment
+	_, err := sanitizeXAuth(config["GOELEVEN_SHAREDSECRET"])
+	if err != nil {
+		exit(fmt.Sprintf("GOELEVEN_SHAREDSECRET: %v", err.Error()), 2)
+	}
 }
 
 func handlesessions() {
+	// String->int64->int convert
+	max, _ := strconv.ParseInt(config["GOELEVEN_MAXSESSIONS"], 10, 0)
+	var maxsessions int = int(max)
 	sem = make(chan Hsm, maxsessions)
 	for currentsessions < maxsessions {
 		currentsessions++
@@ -89,33 +107,85 @@ func handlesessions() {
 	debug(fmt.Sprintf("sem: %v\n", len(sem)))
 }
 
+// Check if the X-Auth string are safe to use
+func sanitizeXAuth(insecureXAuth string) (string, error) {
+	if len(insecureXAuth) >= xauthlen["min"] && len(insecureXAuth) <= xauthlen["max"] {
+		return insecureXAuth, nil
+	}
+	return "", errors.New("X-AUTH do not complies with the defined rules")
+}
+
+// Client authenticate/authorization
+func authClient(r *http.Request) error {
+	xauth, err := sanitizeXAuth(r.Header["X-Auth"][0])
+	if err != nil {
+		return err
+	}
+	if xauth == config["GOELEVEN_SHAREDSECRET"] {
+		return nil
+	}
+	return errors.New("Shared secret mishmash")
+}
+
+// TODO: Cleanup
+// TODO: Documentation
+// TODO: Error handling
+/*
+ * If error then send HTTP 500 to client and keep the server running
+ *
+ */
 func handler(w http.ResponseWriter, r *http.Request) {
+	var err error
 	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9]+)/sign$")
 	m := validPath.FindStringSubmatch(r.URL.Path)
-	//    xauth := ""
 
-	if xauthheader := r.Header["X-Auth"]; xauthheader != nil {
-		//        xauth = xauthheader[0]
-	}
-	//fmt.Printf("headers: %v\n", xauth)
 	defer r.Body.Close()
 	body, _ := ioutil.ReadAll(r.Body)
+
+	// Client auth
+	err = authClient(r)
+	if err != nil {
+		http.Error(w, "Invalid input", 500)
+		fmt.Printf("X-Auth: %v\n", err.Error())
+		return
+	}
+
+	// Parse JSON
 	//var b struct { Data,Mech string }
 	var b map[string]interface{}
-	_ = json.Unmarshal(body, &b)
-	debug(fmt.Sprintf("json: %v\n", b))
-	data, _ := base64.StdEncoding.DecodeString(b["data"].(string))
-	//fmt.Printf("json: %s %v\n", data, err)
-	sig, _ := xxx(data)
+	err = json.Unmarshal(body, &b)
+	if err != nil {
+		http.Error(w, "Invalid input", 500)
+		fmt.Printf("json.unmarshall: %v\n", err.Error())
+		return
+	}
+	data, err := base64.StdEncoding.DecodeString(b["data"].(string))
+	if err != nil {
+		http.Error(w, "Invalid input", 500)
+		fmt.Printf("DecodeString: %v\n", err.Error())
+		return
+	}
+
+	sig, err := signing(data)
+	if err != nil {
+		http.Error(w, "Invalid output", 500)
+		fmt.Printf("signing: %v\n", err.Error())
+		return
+	}
 	sigs := base64.StdEncoding.EncodeToString(sig)
 	type Res struct{ Slot, Mech, Signed string }
 	res := Res{m[1], "mech", sigs}
-	json, _ := json.Marshal(res)
-	//fmt.Printf("body: %v %v\n", b, err)
+	json, err := json.Marshal(res)
+	if err != nil {
+		http.Error(w, "Invalid output", 500)
+		fmt.Printf("json.marshall: %v\n", err.Error())
+		return
+	}
 	fmt.Fprintf(w, "%s\n\n", json)
-
 }
 
+// TODO: Cleanup
+// TODO: Documentation
 func inithsm() Hsm {
 	pguard.Lock()
 	defer pguard.Unlock()
@@ -145,7 +215,10 @@ func inithsm() Hsm {
 	return Hsm{session, obj[0], 0, time.Now()}
 }
 
-func xxx(data []byte) ([]byte, error) {
+// TODO: Cleanup
+// TODO: Documentation
+func signing(data []byte) ([]byte, error) {
+	// Pop HSM struct from queue
 	s := <-sem
 	s.used++
 	if s.used > 10000 || time.Now().Sub(s.started) > 1000*time.Second {
@@ -161,6 +234,7 @@ func xxx(data []byte) ([]byte, error) {
 	sig, err := p.Sign(s.session, data)
 	fmt.Printf("err: %v\n", err)
 
+	// Push HSM struct back on queue
 	sem <- s
 	return sig, nil
 }
@@ -171,6 +245,11 @@ func debug(messages string) {
 	if flagDebug {
 		fmt.Print(messages)
 	}
+}
+
+// Standard function to test for debug mode
+func isdebug() bool {
+	return flagDebug
 }
 
 func exit(messages string, errorCode int) {

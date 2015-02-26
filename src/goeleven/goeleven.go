@@ -37,13 +37,13 @@ var config = map[string]string{
 	"GOELEVEN_MINSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONAGE": "1000000",
+	"GOELEVEN_DEBUG":         "false",
 	"SOFTHSM_CONF":           "softhsm.conf",
 }
 var xauthlen = map[string]int{
 	"min": 12,
 	"max": 32,
 }
-var flagDebug = true
 
 func main() {
 	currentsessions = 0
@@ -246,14 +246,18 @@ func signing(data []byte) ([]byte, error) {
 // Utils
 
 func debug(messages string) {
-	if flagDebug {
+	if config["GOELEVEN_DEBUG"] == "true" {
 		fmt.Print(messages)
 	}
 }
 
 // Standard function to test for debug mode
 func isdebug() bool {
-	return flagDebug
+  if config["GOELEVEN_DEBUG"] == "true" {
+	  return true
+	} else {
+	  return false
+	}
 }
 
 func exit(messages string, errorCode int) {

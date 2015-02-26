@@ -173,7 +173,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sigs := base64.StdEncoding.EncodeToString(sig)
-	type Res struct{ Slot, Mech, Signed string }
+	type Res struct {
+		Slot   string `json:"slot"`
+		Mech   string `json:"mech"`
+		Signed string `json:"signed"`
+	}
 	res := Res{m[1], "mech", sigs}
 	json, err := json.Marshal(res)
 	if err != nil {

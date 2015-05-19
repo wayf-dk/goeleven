@@ -116,15 +116,21 @@ func sanitizeXAuth(insecureXAuth string) (string, error) {
 }
 
 // Client authenticate/authorization
-func authClient(r *http.Request) error {
-	xauth, err := sanitizeXAuth(r.Header["X-Auth"][0])
-	if err != nil {
-		return err
+func authClient(sharedkey string, slot string, keylabel string) error {
+	//  Check sharedkey
+	if sharedkey != config["GOELEVEN_SHAREDSECRET"] {
+		return errors.New("Shared secret not match")
 	}
-	if xauth == config["GOELEVEN_SHAREDSECRET"] {
-		return nil
+	//  Check slot nummer
+	if slot != config["GOELEVEN_SLOT"] {
+		return errors.New("Slot number not match")
 	}
-	return errors.New("Shared secret mishmash")
+	//  Check key aliases/label
+	if keylabel != config["GOELEVEN_KEY_LABEL"] {
+		return errors.New("Key label not match")
+	}
+	// client ok
+	return nil
 }
 
 // TODO: Cleanup
@@ -137,18 +143,11 @@ func authClient(r *http.Request) error {
 func handler(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9]+)/sign$")
-	m := validPath.FindStringSubmatch(r.URL.Path)
+	mSlot := validPath.FindStringSubmatch(r.URL.Path)[1]
+	mKeyAlias := validPath.FindStringSubmatch(r.URL.Path)[2]
 
 	defer r.Body.Close()
 	body, _ := ioutil.ReadAll(r.Body)
-
-	// Client auth
-	err = authClient(r)
-	if err != nil {
-		http.Error(w, "Invalid input", 500)
-		fmt.Printf("X-Auth: %v\n", err.Error())
-		return
-	}
 
 	// Parse JSON
 	//var b struct { Data,Mech string }
@@ -166,6 +165,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Client auth
+	err = authClient(b["sharedkey"].(string), mSlot, mKeyAlias)
+	if err != nil {
+		http.Error(w, "Invalid input", 500)
+		fmt.Printf("authClient: %v\n", err.Error())
+		return
+	}
+
 	sig, err := signing(data)
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
@@ -178,7 +185,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Mech   string `json:"mech"`
 		Signed string `json:"signed"`
 	}
-	res := Res{m[1], "mech", sigs}
+	res := Res{mSlot, "mech", sigs}
 	json, err := json.Marshal(res)
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
@@ -253,10 +260,10 @@ func debug(messages string) {
 
 // Standard function to test for debug mode
 func isdebug() bool {
-  if config["GOELEVEN_DEBUG"] == "true" {
-	  return true
+	if config["GOELEVEN_DEBUG"] == "true" {
+		return true
 	} else {
-	  return false
+		return false
 	}
 }
 

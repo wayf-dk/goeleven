@@ -117,18 +117,22 @@ func sanitizeXAuth(insecureXAuth string) (string, error) {
 }
 
 // Client authenticate/authorization
-func authClient(sharedkey string, slot string, keylabel string) error {
+func authClient(sharedkey string, slot string, keylabel string, mech string) error {
 	//  Check sharedkey
 	if sharedkey != config["GOELEVEN_SHAREDSECRET"] {
-		return errors.New("Shared secret not match")
+		return errors.New("Shared secret does not match")
 	}
 	//  Check slot nummer
 	if slot != config["GOELEVEN_SLOT"] {
-		return errors.New("Slot number not match")
+		return errors.New("Slot number does not match")
 	}
 	//  Check key aliases/label
 	if keylabel != config["GOELEVEN_KEY_LABEL"] {
-		return errors.New("Key label not match")
+		return errors.New("Key label does not match")
+	}
+	//  Check key mech
+	if mech != config["GOELEVEN_MECH"] {
+		return errors.New("Mech does not match")
 	}
 	// client ok
 	return nil

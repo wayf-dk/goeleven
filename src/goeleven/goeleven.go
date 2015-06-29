@@ -20,6 +20,7 @@ type Hsm struct {
 	obj     pkcs11.ObjectHandle
 	used    int
 	started time.Time
+	sessno int
 }
 
 var currentsessions int
@@ -102,7 +103,7 @@ func handlesessions() {
 	sem = make(chan Hsm, maxsessions)
 	for currentsessions < maxsessions {
 		currentsessions++
-		sem <- inithsm()
+		sem <- inithsm(currentsessions)
 	}
 	debug(fmt.Sprintf("sem: %v\n", len(sem)))
 }
@@ -197,12 +198,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 // TODO: Cleanup
 // TODO: Documentation
-func inithsm() Hsm {
+func inithsm(sessno int) Hsm {
 	pguard.Lock()
 	defer pguard.Unlock()
+    slot, _ := strconv.ParseUint(config["GOELEVEN_SLOT"], 10, 32)
+
 	slots, _ := p.GetSlotList(true)
-	debug(fmt.Sprintf("slots: %v\n", slots))
-	session, _ := p.OpenSession(slots[0], pkcs11.CKF_SERIAL_SESSION|pkcs11.CKR_SESSION_READ_ONLY)
+	fmt.Printf("slots: %v\n", slots)
+
+    fmt.Printf("slot: %v\n", slot)
+    session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION )
+
+    if e != nil {
+        panic(fmt.Sprintf("Failed to open session: %s\n", e.Error()))
+    }
+
 	p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
 
 	template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, config["GOELEVEN_KEY_LABEL"]), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
@@ -223,12 +233,14 @@ func inithsm() Hsm {
 		panic("should have found two objects")
 	}
 
-	return Hsm{session, obj[0], 0, time.Now()}
+	fmt.Printf("hsm initialized new: %#v\n", obj[0])
+
+	return Hsm{session, obj[0], 0, time.Now(), sessno}
 }
 
 // TODO: Cleanup
 // TODO: Documentation
-func signing(data []byte) ([]byte, error) {
+func signing(data []byte) ([]byte, error, int) {
 	// Pop HSM struct from queue
 	s := <-sem
 	s.used++
@@ -237,7 +249,7 @@ func signing(data []byte) ([]byte, error) {
 		p.CloseSession(s.session)
 		//p.Finalize()
 		//p.Destroy()
-		s = inithsm()
+		s = inithsm(s.sessno)
 	}
 	fmt.Printf("hsm: %v\n", s)
 	//    p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256_RSA_PKCS, nil)}, s.obj)
@@ -247,7 +259,7 @@ func signing(data []byte) ([]byte, error) {
 
 	// Push HSM struct back on queue
 	sem <- s
-	return sig, nil
+	return sig, nil, s.sessno
 }
 
 // Utils

@@ -38,9 +38,13 @@ var config = map[string]string{
 	"GOELEVEN_MINSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONAGE": "1000000",
+	"GOELEVEN_MECH":          "CKM_RSA_PKCS",
 	"GOELEVEN_DEBUG":         "false",
 	"SOFTHSM_CONF":           "softhsm.conf",
+	"GOELEVEN_HTTPS_KEY":     "false",
+	"GOELEVEN_HTTPS_CERT":    "false",
 }
+
 var xauthlen = map[string]int{
 	"min": 12,
 	"max": 32,
@@ -54,12 +58,20 @@ func main() {
 	p.Initialize()
 	go handlesessions()
 	http.HandleFunc("/", handler)
-	http.ListenAndServe(config["GOELEVEN_INTERFACE"], nil)
+	var err error
+	if config["GOELEVEN_HTTPS_CERT"] == "false" {
+	    err = http.ListenAndServe(config["GOELEVEN_INTERFACE"], nil)
+	} else {
+        err = http.ListenAndServeTLS(config["GOELEVEN_INTERFACE"], config["GOELEVEN_HTTPS_CERT"], config["GOELEVEN_HTTPS_KEY"], nil)
+    }
+    if err != nil {
+        fmt.Printf("main(): %s\n", err)
+    }
 }
 
 // initConfig read several Environment variables and based on them initialise the configuration
 func initConfig() {
-	envFiles := []string{"SOFTHSM_CONF", "GOELEVEN_HSMLIB"}
+	envFiles := []string{"GOELEVEN_HSMLIB"}
 
 	// Load all Environments variables
 	for k, _ := range config {

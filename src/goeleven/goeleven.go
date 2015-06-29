@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,7 @@ var p *pkcs11.Ctx
 var config = map[string]string{
 	"GOELEVEN_HSMLIB":        "",
 	"GOELEVEN_INTERFACE":     "localhost:8080",
+	"GOELEVEN_ALLOWEDIP":     "127.0.0.1",
 	"GOELEVEN_SLOT":          "",
 	"GOELEVEN_SLOT_PASSWORD": "",
 	"GOELEVEN_KEY_LABEL":     "",
@@ -158,8 +160,23 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
  *
  */
 func handler(w http.ResponseWriter, r *http.Request) {
+
+     fmt.Println("access attempt from:", r.RemoteAddr)
+     ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
+     ip := strings.Split(r.RemoteAddr, ":")
+     var allowed bool
+     for _, v := range ips {
+        allowed = allowed || ip[0] == v
+     }
+
+     if (!allowed) {
+         fmt.Println("unauthorised access attempt from:", r.RemoteAddr)
+         http.Error(w,"Unauthorized",http.StatusUnauthorized)
+         return;
+     }
+
 	var err error
-	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9]+)/sign$")
+	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9\\.]+)/sign$")
 	mSlot := validPath.FindStringSubmatch(r.URL.Path)[1]
 	mKeyAlias := validPath.FindStringSubmatch(r.URL.Path)[2]
 
@@ -183,17 +200,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Client auth
-	err = authClient(b["sharedkey"].(string), mSlot, mKeyAlias)
+	err = authClient(b["sharedkey"].(string), mSlot, mKeyAlias, b["mech"].(string))
 	if err != nil {
 		http.Error(w, "Invalid input", 500)
 		fmt.Printf("authClient: %v\n", err.Error())
 		return
 	}
 
-	sig, err := signing(data)
+	sig, err, sessno:= signing(data)
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
-		fmt.Printf("signing: %v\n", err.Error())
+		fmt.Printf("signing: %v %v\n", err.Error(), sessno)
 		return
 	}
 	sigs := base64.StdEncoding.EncodeToString(sig)

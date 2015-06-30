@@ -131,10 +131,10 @@ func handlesessions() {
 		parts := strings.Split(v, ":")
 		label := parts[0]
 		sharedsecret := parts[1]
-        // Test validity of key specific sharedsecret
-        if len(sharedsecret) < sharedsecretlen["min"] || len(sharedsecret) > sharedsecretlen["max"] {
-            exit(fmt.Sprintf("problem with sharedsecret: '%s' for label: '%s'", sharedsecret, label), 2)
-        }
+		// Test validity of key specific sharedsecret
+		if len(sharedsecret) < sharedsecretlen["min"] || len(sharedsecret) > sharedsecretlen["max"] {
+			exit(fmt.Sprintf("problem with sharedsecret: '%s' for label: '%s'", sharedsecret, label), 2)
+		}
 
 		template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, label), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
 		if e := p.FindObjectsInit(s.session, template); e != nil {
@@ -196,7 +196,6 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
  */
 func handler(w http.ResponseWriter, r *http.Request) {
 
-	fmt.Println("access attempt from:", r.RemoteAddr)
 	ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
 	ip := strings.Split(r.RemoteAddr, ":")
 	var allowed bool
@@ -242,7 +241,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig, err, sessno := signing(data, keymap[mKeyAlias].handle)
+	sig, err, sessno := signing(data, mKeyAlias, r.RemoteAddr)
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
 		fmt.Printf("signing: %v %v\n", err.Error(), sessno)
@@ -285,7 +284,7 @@ func inithsm(sessno int) Hsm {
 
 // TODO: Cleanup
 // TODO: Documentation
-func signing(data []byte, key pkcs11.ObjectHandle) ([]byte, error, int) {
+func signing(data []byte, key string, remoteip string) ([]byte, error, int) {
 	// Pop HSM struct from queue
 	s := <-sem
 	s.used++
@@ -296,15 +295,13 @@ func signing(data []byte, key pkcs11.ObjectHandle) ([]byte, error, int) {
 		//p.Destroy()
 		s = inithsm(s.sessno)
 	}
-	fmt.Printf("hsm: %v %v\n", s, key)
-	//p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256_RSA_PKCS, nil)}, key)
-	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, key)
+	fmt.Printf("label: %s handle: %d ip: %s\n", keymap[key].label, keymap[key].handle, remoteip)
+	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, keymap[key].handle)
 	sig, err := p.Sign(s.session, data)
-	fmt.Printf("err: %v\n", err)
 
 	// Push HSM struct back on queue
 	sem <- s
-	return sig, nil, s.sessno
+	return sig, err, s.sessno
 }
 
 // Utils

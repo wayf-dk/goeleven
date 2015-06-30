@@ -18,7 +18,6 @@ import (
 
 type Hsm struct {
 	session pkcs11.SessionHandle
-	obj     pkcs11.ObjectHandle
 	used    int
 	started time.Time
 	sessno int
@@ -47,6 +46,8 @@ var config = map[string]string{
 	"GOELEVEN_HTTPS_CERT":    "false",
 }
 
+var keymap map[string]pkcs11.ObjectHandle
+
 var xauthlen = map[string]int{
 	"min": 12,
 	"max": 32,
@@ -54,11 +55,12 @@ var xauthlen = map[string]int{
 
 func main() {
 	currentsessions = 0
+	keymap = make(map[string]pkcs11.ObjectHandle)
 	//wd, _ := os.Getwd()
 	initConfig()
 	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
 	p.Initialize()
-	go handlesessions()
+	handlesessions()
 	http.HandleFunc("/", handler)
 	var err error
 	if config["GOELEVEN_HTTPS_CERT"] == "false" {
@@ -119,6 +121,37 @@ func handlesessions() {
 		currentsessions++
 		sem <- inithsm(currentsessions)
 	}
+
+	s := <-sem
+
+    keys := strings.Split(config["GOELEVEN_KEY_LABEL"], ",")
+
+    for _, v := range keys {
+
+        template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, v), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
+        if e := p.FindObjectsInit(s.session, template); e != nil {
+            panic(fmt.Sprintf("Failed to init: %s\n", e.Error()))
+        }
+        obj, b, e := p.FindObjects(s.session, 2)
+
+        debug(fmt.Sprintf("Obj %v\n", obj))
+        if e != nil {
+            exit(fmt.Sprintf("Failed to find: %s %v\n", e.Error(), b), 2)
+        }
+        if e := p.FindObjectsFinal(s.session); e != nil {
+            exit(fmt.Sprintf("Failed to finalize: %s\n", e.Error()), 2)
+        }
+        debug(fmt.Sprintf("found keys: %v\n", len(obj)))
+        if len(obj) == 0 {
+            exit(fmt.Sprintf("did not find a key with label '%s'", v), 2)
+        }
+        keymap[v] = obj[0]
+    }
+
+	fmt.Printf("hsm initialized new: %#v\n", keymap)
+
+	sem <- s
+
 	debug(fmt.Sprintf("sem: %v\n", len(sem)))
 }
 
@@ -141,8 +174,8 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
 		return errors.New("Slot number does not match")
 	}
 	//  Check key aliases/label
-	if keylabel != config["GOELEVEN_KEY_LABEL"] {
-		return errors.New("Key label does not match")
+	if keymap[keylabel] == 0 {
+		return errors.New(fmt.Sprintf("Key label does not match %s", keylabel))
 	}
 	//  Check key mech
 	if mech != config["GOELEVEN_MECH"] {
@@ -207,7 +240,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig, err, sessno:= signing(data)
+	sig, err, sessno:= signing(data, keymap[mKeyAlias])
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
 		fmt.Printf("signing: %v %v\n", err.Error(), sessno)
@@ -236,9 +269,6 @@ func inithsm(sessno int) Hsm {
 	defer pguard.Unlock()
     slot, _ := strconv.ParseUint(config["GOELEVEN_SLOT"], 10, 32)
 
-	slots, _ := p.GetSlotList(true)
-	fmt.Printf("slots: %v\n", slots)
-
     fmt.Printf("slot: %v\n", slot)
     session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION )
 
@@ -248,32 +278,12 @@ func inithsm(sessno int) Hsm {
 
 	p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
 
-	template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, config["GOELEVEN_KEY_LABEL"]), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
-	if e := p.FindObjectsInit(session, template); e != nil {
-		panic(fmt.Sprintf("Failed to init: %s\n", e.Error()))
-	}
-	obj, b, e := p.FindObjects(session, 2)
-
-	debug(fmt.Sprintf("Obj %v\n", obj))
-	if e != nil {
-		panic(fmt.Sprintf("Failed to find: %s %v\n", e.Error(), b))
-	}
-	if e := p.FindObjectsFinal(session); e != nil {
-		panic(fmt.Sprintf("Failed to finalize: %s\n", e.Error()))
-	}
-	debug(fmt.Sprintf("found keys: %v\n", len(obj)))
-	if len(obj) == 0 {
-		panic("should have found two objects")
-	}
-
-	fmt.Printf("hsm initialized new: %#v\n", obj[0])
-
-	return Hsm{session, obj[0], 0, time.Now(), sessno}
+	return Hsm{session, 0, time.Now(), sessno}
 }
 
 // TODO: Cleanup
 // TODO: Documentation
-func signing(data []byte) ([]byte, error, int) {
+func signing(data []byte, key pkcs11.ObjectHandle) ([]byte, error, int) {
 	// Pop HSM struct from queue
 	s := <-sem
 	s.used++
@@ -284,9 +294,9 @@ func signing(data []byte) ([]byte, error, int) {
 		//p.Destroy()
 		s = inithsm(s.sessno)
 	}
-	fmt.Printf("hsm: %v\n", s)
-	//    p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256_RSA_PKCS, nil)}, s.obj)
-	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, s.obj)
+	fmt.Printf("hsm: %v %v\n", s, key)
+	//p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256_RSA_PKCS, nil)}, key)
+	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, key)
 	sig, err := p.Sign(s.session, data)
 	fmt.Printf("err: %v\n", err)
 

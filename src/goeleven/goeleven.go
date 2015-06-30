@@ -20,7 +20,13 @@ type Hsm struct {
 	session pkcs11.SessionHandle
 	used    int
 	started time.Time
-	sessno int
+	sessno  int
+}
+
+type aclmap struct {
+	handle       pkcs11.ObjectHandle
+	sharedsecret string
+	label        string
 }
 
 var currentsessions int
@@ -35,7 +41,6 @@ var config = map[string]string{
 	"GOELEVEN_SLOT":          "",
 	"GOELEVEN_SLOT_PASSWORD": "",
 	"GOELEVEN_KEY_LABEL":     "",
-	"GOELEVEN_SHAREDSECRET":  "",
 	"GOELEVEN_MINSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONS":   "1",
 	"GOELEVEN_MAXSESSIONAGE": "1000000",
@@ -46,16 +51,16 @@ var config = map[string]string{
 	"GOELEVEN_HTTPS_CERT":    "false",
 }
 
-var keymap map[string]pkcs11.ObjectHandle
+var keymap map[string]aclmap
 
-var xauthlen = map[string]int{
+var sharedsecretlen = map[string]int{
 	"min": 12,
 	"max": 32,
 }
 
 func main() {
 	currentsessions = 0
-	keymap = make(map[string]pkcs11.ObjectHandle)
+	keymap = make(map[string]aclmap)
 	//wd, _ := os.Getwd()
 	initConfig()
 	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
@@ -64,13 +69,13 @@ func main() {
 	http.HandleFunc("/", handler)
 	var err error
 	if config["GOELEVEN_HTTPS_CERT"] == "false" {
-	    err = http.ListenAndServe(config["GOELEVEN_INTERFACE"], nil)
+		err = http.ListenAndServe(config["GOELEVEN_INTERFACE"], nil)
 	} else {
-        err = http.ListenAndServeTLS(config["GOELEVEN_INTERFACE"], config["GOELEVEN_HTTPS_CERT"], config["GOELEVEN_HTTPS_KEY"], nil)
-    }
-    if err != nil {
-        fmt.Printf("main(): %s\n", err)
-    }
+		err = http.ListenAndServeTLS(config["GOELEVEN_INTERFACE"], config["GOELEVEN_HTTPS_CERT"], config["GOELEVEN_HTTPS_KEY"], nil)
+	}
+	if err != nil {
+		fmt.Printf("main(): %s\n", err)
+	}
 }
 
 // initConfig read several Environment variables and based on them initialise the configuration
@@ -105,11 +110,6 @@ func initConfig() {
 			exit(fmt.Sprintf("%s %s", v, err.Error()), 2)
 		}
 	}
-	// Test XAUTH enviroment
-	_, err := sanitizeXAuth(config["GOELEVEN_SHAREDSECRET"])
-	if err != nil {
-		exit(fmt.Sprintf("GOELEVEN_SHAREDSECRET: %v", err.Error()), 2)
-	}
 }
 
 func handlesessions() {
@@ -124,29 +124,37 @@ func handlesessions() {
 
 	s := <-sem
 
-    keys := strings.Split(config["GOELEVEN_KEY_LABEL"], ",")
+	keys := strings.Split(config["GOELEVEN_KEY_LABEL"], ",")
 
-    for _, v := range keys {
+	for _, v := range keys {
 
-        template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, v), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
-        if e := p.FindObjectsInit(s.session, template); e != nil {
-            panic(fmt.Sprintf("Failed to init: %s\n", e.Error()))
+		parts := strings.Split(v, ":")
+		label := parts[0]
+		sharedsecret := parts[1]
+        // Test validity of key specific sharedsecret
+        if len(sharedsecret) < sharedsecretlen["min"] || len(sharedsecret) > sharedsecretlen["max"] {
+            exit(fmt.Sprintf("problem with sharedsecret: '%s' for label: '%s'", sharedsecret, label), 2)
         }
-        obj, b, e := p.FindObjects(s.session, 2)
 
-        debug(fmt.Sprintf("Obj %v\n", obj))
-        if e != nil {
-            exit(fmt.Sprintf("Failed to find: %s %v\n", e.Error(), b), 2)
-        }
-        if e := p.FindObjectsFinal(s.session); e != nil {
-            exit(fmt.Sprintf("Failed to finalize: %s\n", e.Error()), 2)
-        }
-        debug(fmt.Sprintf("found keys: %v\n", len(obj)))
-        if len(obj) == 0 {
-            exit(fmt.Sprintf("did not find a key with label '%s'", v), 2)
-        }
-        keymap[v] = obj[0]
-    }
+		template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, label), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
+		if e := p.FindObjectsInit(s.session, template); e != nil {
+			panic(fmt.Sprintf("Failed to init: %s\n", e.Error()))
+		}
+		obj, b, e := p.FindObjects(s.session, 2)
+
+		debug(fmt.Sprintf("Obj %v\n", obj))
+		if e != nil {
+			exit(fmt.Sprintf("Failed to find: %s %v\n", e.Error(), b), 2)
+		}
+		if e := p.FindObjectsFinal(s.session); e != nil {
+			exit(fmt.Sprintf("Failed to finalize: %s\n", e.Error()), 2)
+		}
+		debug(fmt.Sprintf("found keys: %v\n", len(obj)))
+		if len(obj) == 0 {
+			exit(fmt.Sprintf("did not find a key with label '%s'", label), 2)
+		}
+		keymap[label] = aclmap{obj[0], sharedsecret, label}
+	}
 
 	fmt.Printf("hsm initialized new: %#v\n", keymap)
 
@@ -155,28 +163,22 @@ func handlesessions() {
 	debug(fmt.Sprintf("sem: %v\n", len(sem)))
 }
 
-// Check if the X-Auth string are safe to use
-func sanitizeXAuth(insecureXAuth string) (string, error) {
-	if len(insecureXAuth) >= xauthlen["min"] && len(insecureXAuth) <= xauthlen["max"] {
-		return insecureXAuth, nil
-	}
-	return "", errors.New("X-AUTH do not complies with the defined rules")
-}
-
 // Client authenticate/authorization
 func authClient(sharedkey string, slot string, keylabel string, mech string) error {
 	//  Check sharedkey
-	if sharedkey != config["GOELEVEN_SHAREDSECRET"] {
-		return errors.New("Shared secret does not match")
-	}
 	//  Check slot nummer
 	if slot != config["GOELEVEN_SLOT"] {
 		return errors.New("Slot number does not match")
 	}
 	//  Check key aliases/label
-	if keymap[keylabel] == 0 {
+	if _, present := keymap[keylabel]; !present {
 		return errors.New(fmt.Sprintf("Key label does not match %s", keylabel))
 	}
+
+	if sharedkey != keymap[keylabel].sharedsecret {
+		return errors.New(fmt.Sprintf("Client secret for label: '%s' does not match", keymap[keylabel].label))
+	}
+
 	//  Check key mech
 	if mech != config["GOELEVEN_MECH"] {
 		return errors.New("Mech does not match")
@@ -194,19 +196,19 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
  */
 func handler(w http.ResponseWriter, r *http.Request) {
 
-     fmt.Println("access attempt from:", r.RemoteAddr)
-     ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
-     ip := strings.Split(r.RemoteAddr, ":")
-     var allowed bool
-     for _, v := range ips {
-        allowed = allowed || ip[0] == v
-     }
+	fmt.Println("access attempt from:", r.RemoteAddr)
+	ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
+	ip := strings.Split(r.RemoteAddr, ":")
+	var allowed bool
+	for _, v := range ips {
+		allowed = allowed || ip[0] == v
+	}
 
-     if (!allowed) {
-         fmt.Println("unauthorised access attempt from:", r.RemoteAddr)
-         http.Error(w,"Unauthorized",http.StatusUnauthorized)
-         return;
-     }
+	if !allowed {
+		fmt.Println("unauthorised access attempt from:", r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
 	var err error
 	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9\\.]+)/sign$")
@@ -240,7 +242,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig, err, sessno:= signing(data, keymap[mKeyAlias])
+	sig, err, sessno := signing(data, keymap[mKeyAlias].handle)
 	if err != nil {
 		http.Error(w, "Invalid output", 500)
 		fmt.Printf("signing: %v %v\n", err.Error(), sessno)
@@ -267,14 +269,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func inithsm(sessno int) Hsm {
 	pguard.Lock()
 	defer pguard.Unlock()
-    slot, _ := strconv.ParseUint(config["GOELEVEN_SLOT"], 10, 32)
+	slot, _ := strconv.ParseUint(config["GOELEVEN_SLOT"], 10, 32)
 
-    fmt.Printf("slot: %v\n", slot)
-    session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION )
+	fmt.Printf("slot: %v\n", slot)
+	session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION)
 
-    if e != nil {
-        panic(fmt.Sprintf("Failed to open session: %s\n", e.Error()))
-    }
+	if e != nil {
+		panic(fmt.Sprintf("Failed to open session: %s\n", e.Error()))
+	}
 
 	p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
 

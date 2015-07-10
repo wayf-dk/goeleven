@@ -156,7 +156,7 @@ func handlesessions() {
 		keymap[label] = aclmap{obj[0], sharedsecret, label}
 	}
 
-	fmt.Printf("hsm initialized new: %#v\n", keymap)
+	fmt.Printf("hsm initialized")
 
 	sem <- s
 

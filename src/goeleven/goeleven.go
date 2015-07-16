@@ -274,7 +274,14 @@ func inithsm(sessno int) Hsm {
 	session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION)
 
 	if e != nil {
-		panic(fmt.Sprintf("Failed to open session: %s\n", e.Error()))
+		// Try to reconnect
+		fmt.Printf("OpenSession error %s. Reinitialize hsm connection.", e.Error())
+		p.Initialize()
+		session, e = p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION)
+		if e != nil {
+			//	panic(fmt.Sprintf("Failed to open session: %s\n", e.Error()))
+			exit(fmt.Sprintf("Terminate goeleven, failed to reopen session: %s\n", e.Error()), 2)
+		}
 	}
 
 	p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])

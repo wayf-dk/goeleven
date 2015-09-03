@@ -353,7 +353,7 @@ func initpkcs11lib(restart bool) {
 			err = nil
 		} else {
 			log.Printf("waiting: %v\n", err.Error())
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Second)
 			err = p.Initialize()
 		}
 	}

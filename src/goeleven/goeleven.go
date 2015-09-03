@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/facebookgo/grace/gracehttp"
 	"github.com/wayf-dk/pkcs11"
 	"io/ioutil"
 	"log"
 	//	"log/syslog"
-	"github.com/facebookgo/grace/gracehttp"
+	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -59,6 +60,15 @@ var (
 		"min": 12,
 		"max": 32,
 	}
+
+    src = rand.NewSource(time.Now().UnixNano())
+)
+
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
 )
 
 func main() {
@@ -76,6 +86,7 @@ func main() {
 
 	go bginit()
 
+	http.HandleFunc("/status", statushandler)
 	http.HandleFunc("/", handler)
 	var err error
 	if config["GOELEVEN_HTTPS_CERT"] == "false" {
@@ -331,6 +342,41 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 }
 
+func statushandler(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	contextmutex.RLock()
+	ctx := context[r]
+	contextmutex.RUnlock()
+
+    // signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
+    data :=  []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
+    data = append(data,  RandStringBytesMaskImprSrc(40) ...)
+	_, err := signing(data, "wildcard.test.lan.key")
+	if err != nil {
+		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
+		return
+	}
+}
+
+// Make a random string - from http://stackoverflow.com/a/31832326
+func RandStringBytesMaskImprSrc(n int) []byte {
+    b := make([]byte, n)
+    // A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+    for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+        if remain == 0 {
+            cache, remain = src.Int63(), letterIdxMax
+        }
+        if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+            b[i] = letterBytes[idx]
+            i--
+        }
+        cache >>= letterIdxBits
+        remain--
+    }
+
+    return b
+}
+
 func initpkcs11lib(restart bool) {
 	select {
 	case _ = <-pkcs11liblock:
@@ -398,6 +444,8 @@ func signing(data []byte, key string) ([]byte, error) {
 
 	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, keymap[key].handle)
 	sig, err := p.Sign(s.session, data)
+	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
+	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
 	if err != nil {
 		go initpkcs11lib(true)
 	}

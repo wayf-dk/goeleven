@@ -1,5 +1,14 @@
 package main
 
+/*
+    /(sign|decrypt)/<slot label>/<key label/
+    Post data:
+		Data      string `json:"data"`
+		Mech      string `json:"mech"`   // using pkscs11 names: signing: CKM_SHA1_RSA_PKCS, CKM_SHA256_RSA_PKCS, CKM_RSA_PKCS(prehashed) decrypting: CKM_RSA_PKCS_OAEP
+		Digest    string `json:"digest"  // using pkcs11 names: CKM_SHA_1, CKM_SHA256 - only used for decrypting
+		Sharedkey string `json:"sharedkey"`
+*/
+
 import (
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type Hsm struct {
@@ -31,6 +41,13 @@ type aclmap struct {
 	label        string
 }
 
+type request struct {
+	Data      []byte `json:"data"`
+	Mech      string `json:"mech"`
+	Digest    string `json:"digest"`
+	Sharedkey string `json:"sharedkey"`
+}
+
 var (
 	contextmutex sync.RWMutex
 	context      = make(map[*http.Request]map[string]string)
@@ -39,6 +56,8 @@ var (
 	p             *pkcs11.Ctx
 	sem           chan Hsm
 	pkcs11liblock chan int
+    slot uint
+
 
 	config = map[string]string{
 		"GOELEVEN_HSMLIB":        "",
@@ -48,20 +67,36 @@ var (
 		"GOELEVEN_SLOT_PASSWORD": "",
 		"GOELEVEN_KEY_LABEL":     "",
 		"GOELEVEN_MAXSESSIONS":   "1",
-		"GOELEVEN_MECH":          "CKM_RSA_PKCS",
+//		"GOELEVEN_MECH":          "CKM_RSA_PKCS",
 		"SOFTHSM_CONF":           "softhsm.conf",
 		"GOELEVEN_HTTPS_KEY":     "false",
 		"GOELEVEN_HTTPS_CERT":    "false",
 	}
 
+	methods = map[string]uint{
+		"CKM_SHA1_RSA_PKCS":   pkcs11.CKM_SHA1_RSA_PKCS,
+		"CKM_SHA256_RSA_PKCS": pkcs11.CKM_SHA256_RSA_PKCS,
+		"CKM_RSA_PKCS":        pkcs11.CKM_RSA_PKCS,
+		"CKM_RSA_PKCS_OAEP":   pkcs11.CKM_RSA_PKCS_OAEP,
+		"CKM_SHA_1":           pkcs11.CKM_SHA_1,
+		"CKM_SHA256":          pkcs11.CKM_SHA256,
+	}
+
 	keymap map[string]aclmap
+
+	slotmap map[string]pkcs11.ObjectHandle
+
+	operations = map[string]func([]byte, request, pkcs11.ObjectHandle) ([]byte, error) {
+	    "sign": sign,
+	    "decrypt": decrypt,
+	}
 
 	sharedsecretlen = map[string]int{
 		"min": 12,
 		"max": 32,
 	}
 
-    src = rand.NewSource(time.Now().UnixNano())
+	src = rand.NewSource(time.Now().UnixNano())
 )
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -78,6 +113,8 @@ func main() {
 	//	}
 
 	keymap = make(map[string]aclmap)
+	slotmap = make(map[string]pkcs11.ObjectHandle)
+
 	initConfig()
 
 	pkcs11liblock = make(chan int, 1)
@@ -174,14 +211,27 @@ func prepareobjects(labels string) (err error) {
 	var s Hsm
 	err = p.Initialize()
 	defer p.Finalize()
+
+	slots, e := p.GetSlotList(true)
+	if e != nil {
+		log.Fatalf("slots %s\n", e.Error())
+	}
+
+    for _, s := range slots {
+        tokeninfo, _ := p.GetTokenInfo(s)
+        if (tokeninfo.Label == config["GOELEVEN_SLOT"]) {
+            slot = s;
+	        log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
+            break
+        }
+    }
+
 	s, err = initsession()
 	if err != nil {
 		return
 	}
 	defer p.CloseSession(s.session)
 	defer p.Logout(s.session)
-
-	log.Printf("initsession result: %v\n", err)
 
 	keys := strings.Split(labels, ",")
 
@@ -279,30 +329,30 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	// handle non ok urls gracefully
 	var err error
-	var validPath = regexp.MustCompile("^/(\\d+)/([a-zA-Z0-9\\.]+)/sign$")
+	var validPath = regexp.MustCompile("^/(sign/decrypt)/([a-zA-Z0-9\\.]+)/([a-zA-Z0-9\\.]+)$")
 	match := validPath.FindStringSubmatch(r.URL.Path)
 	if match == nil {
 		logandsenderror(w, "Invalid path", ctx)
 		return
 	}
-	mSlot := match[1]
-	mKeyAlias := match[2]
+
+	mOperation := match[1]
+	mSlotAlias := match[2]
+	mKeyAlias := match[3]
 
 	body, _ := ioutil.ReadAll(r.Body)
 
-	// Parse JSON
-	var b struct {
-		Data      string `json:"data"`
-		Mech      string `json:"mech"`
-		Sharedkey string `json:"sharedkey"`
-	}
+    b := request{}
+
 	err = json.Unmarshal(body, &b)
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("json.unmarshall: %v", err.Error()), ctx)
 		return
 	}
 
-	data, err := base64.StdEncoding.DecodeString(b.Data)
+	data := make([]byte, base64.StdEncoding.DecodedLen(len(b.Data)))
+    _, err = base64.StdEncoding.Decode(data, []byte(b.Data))
+
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("DecodeString: %v", err.Error()), ctx)
 		return
@@ -313,25 +363,28 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+
 	// Client auth
-	err = authClient(b.Sharedkey, mSlot, mKeyAlias, b.Mech)
+	err = authClient(b.Sharedkey, mSlotAlias, mKeyAlias, b.Mech)
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("authClient: %v", err.Error()), ctx)
 		return
 	}
 
-	sig, err := signing(data, mKeyAlias)
+	key := keymap[mKeyAlias].handle
+
+	sig, err := operations[mOperation](data, b, key)
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
 		return
 	}
-	sigs := base64.StdEncoding.EncodeToString(sig)
+
+	result := base64.StdEncoding.EncodeToString(sig)
+
 	type Res struct {
-		Slot   string `json:"slot"`
-		Mech   string `json:"mech"`
-		Signed string `json:"signed"`
+		Result string `json:"signed"`
 	}
-	res := Res{mSlot, "mech", sigs}
+	res := Res{result}
 	json, err := json.Marshal(res)
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("json.marshall: %s", err.Error()), ctx)
@@ -348,10 +401,11 @@ func statushandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context[r]
 	contextmutex.RUnlock()
 
-    // signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
-    data :=  []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
-    data = append(data,  RandStringBytesMaskImprSrc(40) ...)
-	_, err := signing(data, "wildcard.test.lan.key")
+	// signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
+	data := []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
+	data = append(data, RandStringBytesMaskImprSrc(40)...)
+	b := request{Mech: "CKM_RSA_PKCS"}
+	_, err := sign(data, b, keymap["wildcard.test.lan.key"].handle)
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
 		return
@@ -360,21 +414,21 @@ func statushandler(w http.ResponseWriter, r *http.Request) {
 
 // Make a random string - from http://stackoverflow.com/a/31832326
 func RandStringBytesMaskImprSrc(n int) []byte {
-    b := make([]byte, n)
-    // A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-    for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-        if remain == 0 {
-            cache, remain = src.Int63(), letterIdxMax
-        }
-        if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-            b[i] = letterBytes[idx]
-            i--
-        }
-        cache >>= letterIdxBits
-        remain--
-    }
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
 
-    return b
+	return b
 }
 
 func initpkcs11lib(restart bool) {
@@ -416,14 +470,11 @@ func initpkcs11lib(restart bool) {
 // TODO: Cleanup
 // TODO: Documentation
 func initsession() (Hsm, error) {
-	slot, _ := strconv.ParseUint(config["GOELEVEN_SLOT"], 10, 32)
 
-	log.Printf("slot: %v\n", slot)
-	session, e := p.OpenSession(uint(slot), pkcs11.CKF_SERIAL_SESSION)
+	session, e := p.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION)
 
 	if e != nil {
-		log.Printf("Failed to open session: %s\n", e.Error())
-		// panic(log.Sprintf("Failed to open session: %s\n", e.Error()))
+		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
 	e = p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
@@ -438,11 +489,11 @@ func initsession() (Hsm, error) {
 
 // TODO: Cleanup
 // TODO: Documentation
-func signing(data []byte, key string) ([]byte, error) {
+func sign(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
 	var err error
 	s := <-sem
 
-	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, keymap[key].handle)
+	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key)
 	sig, err := p.Sign(s.session, data)
 	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
 	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
@@ -452,4 +503,41 @@ func signing(data []byte, key string) ([]byte, error) {
 
 	sem <- s
 	return sig, err
+}
+
+// TODO: Cleanup
+// TODO: Documentation
+
+func decrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
+
+    type oaepParams struct {
+        hashAlg uint
+        mgf uint
+        source uint
+        pSourceData *byte
+        ulSourceDataLen uint
+    }
+
+	buf := make([]byte, int(unsafe.Sizeof(oaepParams{})))
+	params := (*oaepParams)(unsafe.Pointer(&buf[0]))
+
+	params.hashAlg = methods[parms.Digest]
+	params.mgf = 1 // CKG_MGF1_SHA1
+	params.source = 1 // CKZ_DATA_SPECIFIED
+	params.pSourceData = nil
+	params.ulSourceDataLen = 0
+
+	var err error
+	s := <-sem
+
+	err = p.DecryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
+	plain, err := p.Decrypt(s.session, data)
+	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
+	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
+	if err != nil {
+		go initpkcs11lib(true)
+	}
+
+	sem <- s
+	return plain, err
 }

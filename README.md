@@ -1,7 +1,7 @@
 goeleven
 ========
 
-Go implementation of Python PKCS11 REST Proxy (leifj/pyeleven)
+Go implementation of Python PKCS11 REST Proxy (https://github.com/leifj/pyeleven)
 
 Requirements 
 * ubuntu package libltdl-dev

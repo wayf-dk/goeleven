@@ -24,4 +24,4 @@ _testmain.go
 *.prof
 
 # Ignore compiled bin file
-bin/goeleven
+bin/*

@@ -1,19 +1,12 @@
 package main
 
 /*
-<<<<<<< HEAD
     /(sign|encrypt|decrypt)/<slot label>/<key label/
-=======
-    /(sign|decrypt)/<slot label>/<key label/
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
     Post data:
 		Data      string `json:"data"`
 		Mech      string `json:"mech"`   // using pkscs11 names: signing: CKM_SHA1_RSA_PKCS, CKM_SHA256_RSA_PKCS, CKM_RSA_PKCS(prehashed) decrypting: CKM_RSA_PKCS_OAEP
 		Digest    string `json:"digest"  // using pkcs11 names: CKM_SHA_1, CKM_SHA256 - only used for decrypting
-<<<<<<< HEAD
 		Function  string `json:"Function" // decrypt | sign
-=======
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 		Sharedkey string `json:"sharedkey"`
 */
 
@@ -34,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 )
@@ -50,16 +42,10 @@ type aclmap struct {
 }
 
 type request struct {
-<<<<<<< HEAD
 	Data      string `json:"data"`
 	Mech      string `json:"mech"`
 	Digest    string `json:"digest"`
 	Function  string `json:"function"`
-=======
-	Data      []byte `json:"data"`
-	Mech      string `json:"mech"`
-	Digest    string `json:"digest"`
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	Sharedkey string `json:"sharedkey"`
 }
 
@@ -70,7 +56,6 @@ var (
 	maxsessions   int
 	p             *pkcs11.Ctx
 	sem           chan Hsm
-	pkcs11liblock chan int
     slot uint
 
 
@@ -102,14 +87,9 @@ var (
 	slotmap map[string]pkcs11.ObjectHandle
 
 	operations = map[string]func([]byte, request, pkcs11.ObjectHandle) ([]byte, error) {
-<<<<<<< HEAD
 		"sign":   sign,
 		"decrypt":   decrypt,
 		"encrypt":   encrypt,
-=======
-	    "sign": sign,
-	    "decrypt": decrypt,
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	}
 
 	sharedsecretlen = map[string]int{
@@ -138,11 +118,13 @@ func main() {
 
 	initConfig()
 
-	pkcs11liblock = make(chan int, 1)
-	pkcs11liblock <- 1
 	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
 
-	go bginit()
+    // sem must not be nil as this will block forever all clients that tries to read before
+    // clients are made available in sem asyncroniously as they become ready in initpkcs11lib
+	sem = make(chan Hsm, maxsessions)
+
+	bginit()
 
 	http.HandleFunc("/status", statushandler)
 	http.HandleFunc("/", handler)
@@ -160,7 +142,6 @@ func main() {
 }
 
 func bginit() {
-	// Init channel
 tryagain:
 	for {
 		if err := prepareobjects(config["GOELEVEN_KEY_LABEL"]); err != nil {
@@ -170,7 +151,7 @@ tryagain:
 		}
 		break
 	}
-	go initpkcs11lib(false)
+	go initpkcs11lib()
 }
 
 func Log(handler http.Handler) http.Handler {
@@ -346,26 +327,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	// handle non ok urls gracefully
 	var err error
-<<<<<<< HEAD
 	var validPath = regexp.MustCompile("^/([ a-zA-Z0-9\\.]+)/([a-zA-Z0-9\\.]+)$")
 	log.Printf("url: %v\n", r.URL.Path)
-=======
-	var validPath = regexp.MustCompile("^/(sign/decrypt)/([a-zA-Z0-9\\.]+)/([a-zA-Z0-9\\.]+)$")
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	match := validPath.FindStringSubmatch(r.URL.Path)
 	if match == nil {
 		logandsenderror(w, "Invalid path", ctx)
 		return
 	}
 
-<<<<<<< HEAD
 	mSlotAlias := match[1]
 	mKeyAlias := match[2]
-=======
-	mOperation := match[1]
-	mSlotAlias := match[2]
-	mKeyAlias := match[3]
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 
 	body, _ := ioutil.ReadAll(r.Body)
 
@@ -380,12 +351,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
     data, err := base64.StdEncoding.DecodeString(b.Data)
 
-<<<<<<< HEAD
-=======
-	data := make([]byte, base64.StdEncoding.DecodedLen(len(b.Data)))
-    _, err = base64.StdEncoding.Decode(data, []byte(b.Data))
-
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("DecodeString: %v", err.Error()), ctx)
 		return
@@ -406,11 +371,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	key := keymap[mKeyAlias].handle
 
-<<<<<<< HEAD
 	sig, err := operations[b.Function]([]byte(data), b, key)
-=======
-	sig, err := operations[mOperation](data, b, key)
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("%s error: %s", b.Function, err.Error()), ctx)
 		return
@@ -468,22 +429,7 @@ func RandStringBytesMaskImprSrc(n int) []byte {
 	return b
 }
 
-func initpkcs11lib(restart bool) {
-	select {
-	case _ = <-pkcs11liblock:
-		log.Printf("initpkcs11lib restart %v\n", restart)
-		// send a SIGUSR2 signal - once - to self - to let grace start a new process for serving new requests
-		// we just fails ungracefully when a new process tells us to get lost ...
-		if restart {
-			syscall.Kill(syscall.Getpid(), syscall.SIGUSR2)
-			return
-		}
-	default:
-		return
-	}
-
-	sem = make(chan Hsm, maxsessions)
-
+func initpkcs11lib() {
 	err := p.Initialize()
 	for err != nil {
 		if err.Error() == "pkcs11: 0x191: CKR_CRYPTOKI_ALREADY_INITIALIZED" {
@@ -500,7 +446,6 @@ func initpkcs11lib(restart bool) {
 		sem <- s
 	}
 
-	pkcs11liblock <- 1
 	log.Printf("initialized lib\n")
 }
 
@@ -529,68 +474,20 @@ func initsession() (Hsm, error) {
 func sign(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
 	var err error
 	s := <-sem
+	defer func() {sem <- s}()
 
-<<<<<<< HEAD
 	err = p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key)
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
 	if err != nil {
 		log.Fatalf("SignInit failed: %v, %s\n", methods[parms.Mech], err.Error())
 	}
-=======
-	p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key)
->>>>>>> 923febfa1ec2a802d52a0669f55c4e5e4ff20bcb
 	sig, err := p.Sign(s.session, data)
-	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
-	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
 	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
 		log.Fatalf("%s\n", err.Error())
-		//go initpkcs11lib(true)
 	}
 
-	sem <- s
 	return sig, err
-}
-
-// TODO: Cleanup
-// TODO: Documentation
-
-func decrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
-
-    type oaepParams struct {
-        hashAlg uint
-        mgf uint
-        source uint
-        pSourceData *byte
-        ulSourceDataLen uint
-    }
-
-	buf := make([]byte, int(unsafe.Sizeof(oaepParams{})))
-	params := (*oaepParams)(unsafe.Pointer(&buf[0]))
-
-	params.hashAlg = pkcs11.CKM_SHA_1
-	params.mgf = 1 // CKG_MGF1_SHA1
-	params.source = 1 // CKZ_DATA_SPECIFIED
-	params.pSourceData = nil
-	params.ulSourceDataLen = 0
-
-	var err error
-	s := <-sem
-
-    log.Printf("decrypt: %v, %v, %v\n", key, methods[parms.Mech], methods[parms.Digest])
-
-	err = p.DecryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS_OAEP, buf)}, key)
-	if err != nil {
-		log.Printf("decryptinit failed: %v, %s\n", methods[parms.Mech], err.Error())
-	}
-
-	plain, err := p.Decrypt(s.session, data)
-	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
-	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
-	if err != nil {
-		go initpkcs11lib(true)
-	}
-
-	sem <- s
-	return plain, err
 }
 
 func encrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
@@ -614,16 +511,19 @@ func encrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error
 
 	var err error
 	s := <-sem
+	defer func() {sem <- s}()
 
 	err = p.EncryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
+	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
+		log.Fatalf("%s\n", err.Error())
+	}
 	plain, err := p.Encrypt(s.session, data)
-	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
-	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
-	if err != nil {
-		go initpkcs11lib(true)
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
+	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
+		log.Fatalf("%s\n", err.Error())
 	}
 
-	sem <- s
 	return plain, err
 }
 
@@ -651,15 +551,18 @@ func decrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error
 
 	var err error
 	s := <-sem
+	defer func() {sem <- s}()
 
 	err = p.DecryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
+	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
+		log.Fatalf("%s\n", err.Error())
+	}
 	plain, err := p.Decrypt(s.session, data)
-	// to do - do not balk on signing error: pkcs11: 0x21: CKR_DATA_LEN_RANGE
-	// or only on signing error: pkcs11: 0x30: CKR_DEVICE_ERROR
-	if err != nil {
-		go initpkcs11lib(true)
+	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
+	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
+		log.Fatalf("%s\n", err.Error())
 	}
 
-	sem <- s
 	return plain, err
 }

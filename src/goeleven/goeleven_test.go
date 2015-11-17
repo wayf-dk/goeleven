@@ -21,10 +21,9 @@ func init() {
 
 	initConfig()
 
-	pkcs11liblock = make(chan int, 1)
-	pkcs11liblock <- 1
 	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
 
+	sem = make(chan Hsm, maxsessions)
 	bginit()
     http.HandleFunc("/", handler)
 }

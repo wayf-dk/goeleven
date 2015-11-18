@@ -101,6 +101,7 @@ var (
 )
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
 const (
 	letterIdxBits = 6                    // 6 bits to represent a letter index
 	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
@@ -432,13 +433,7 @@ func RandStringBytesMaskImprSrc(n int) []byte {
 func initpkcs11lib() {
 	err := p.Initialize()
 	for err != nil {
-		if err.Error() == "pkcs11: 0x191: CKR_CRYPTOKI_ALREADY_INITIALIZED" {
-			err = nil
-		} else {
-			log.Printf("waiting: %v\n", err.Error())
-			time.Sleep(1 * time.Second)
-			err = p.Initialize()
-		}
+        log.Fatal("Failed to initialize pkcs11")
 	}
 
 	for currentsessions := 0; currentsessions < maxsessions; currentsessions++ {

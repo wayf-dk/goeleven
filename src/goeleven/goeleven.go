@@ -438,6 +438,9 @@ func initpkcs11lib() {
 
 	for currentsessions := 0; currentsessions < maxsessions; currentsessions++ {
 		s, _ := initsession()
+        // need to call FindObjectsInit to be able to use objects in ha partition
+    	template := []*pkcs11.Attribute{}
+	    _ = p.FindObjectsInit(s.session, template)
 		sem <- s
 	}
 

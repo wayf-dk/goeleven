@@ -43,7 +43,7 @@ func ExampleSignError() {
 
 	payload := bytes.NewReader(payloadjson)
 
-    r, _ := http.NewRequest("POST", "/wayfha/wildcard.test.lan.key", payload)
+    r, _ := http.NewRequest("POST", "/wayf/wildcard.test.lan.key", payload)
     r.RemoteAddr = "127.0.0.1"
     w := httptest.NewRecorder()
 
@@ -68,7 +68,7 @@ func ExampleSign() {
 
 	payload := bytes.NewReader(payloadjson)
 
-    r, _ := http.NewRequest("POST", "/wayfha/wildcard.test.lan.key", payload)
+    r, _ := http.NewRequest("POST", "/wayf/wildcard.test.lan.key", payload)
     r.RemoteAddr = "127.0.0.1"
     w := httptest.NewRecorder()
 
@@ -107,7 +107,7 @@ func ExampleDecrypt() {
 
 	payload := bytes.NewReader(payloadjson)
 
-    r, _ := http.NewRequest("POST", "/wayfha/betawayf.wayf.dk.key", payload)
+    r, _ := http.NewRequest("POST", "/wayf/betawayf.wayf.dk.key", payload)
     r.RemoteAddr = "127.0.0.1"
     w := httptest.NewRecorder()
 

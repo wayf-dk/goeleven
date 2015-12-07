@@ -63,11 +63,11 @@ var (
 		"GOELEVEN_HSMLIB":        "",
 		"GOELEVEN_INTERFACE":     "localhost:8080",
 		"GOELEVEN_ALLOWEDIP":     "127.0.0.1",
+		"GOELEVEN_SERIALNUMBER":  "",
 		"GOELEVEN_SLOT":          "",
 		"GOELEVEN_SLOT_PASSWORD": "",
 		"GOELEVEN_KEY_LABEL":     "",
 		"GOELEVEN_MAXSESSIONS":   "1",
-//		"GOELEVEN_MECH":          "CKM_RSA_PKCS",
 		"SOFTHSM_CONF":           "softhsm.conf",
 		"GOELEVEN_HTTPS_KEY":     "false",
 		"GOELEVEN_HTTPS_CERT":    "false",
@@ -222,7 +222,7 @@ func prepareobjects(labels string) (err error) {
 
     for _, s := range slots {
         tokeninfo, _ := p.GetTokenInfo(s)
-        if (tokeninfo.Label == config["GOELEVEN_SLOT"]) {
+        if (tokeninfo.SerialNumber == config["GOELEVEN_SERIALNUMBER"]) { // tokeninfo.SerialNumber is string
             slot = s;
 	        log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
             break

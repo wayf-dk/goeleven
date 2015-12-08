@@ -222,7 +222,7 @@ func prepareobjects(labels string) (err error) {
 
     for _, s := range slots {
         tokeninfo, _ := p.GetTokenInfo(s)
-        if (tokeninfo.SerialNumber == config["GOELEVEN_SERIALNUMBER"]) { // tokeninfo.SerialNumber is string
+        if (tokeninfo.SerialNumber == config["GOELEVEN_SERIALNUMBER"] || tokeninfo.Label == config["GOELEVEN_SERIALNUMBER"]) { // tokeninfo.SerialNumber is string
             slot = s;
 	        log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
             break

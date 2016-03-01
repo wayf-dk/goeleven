@@ -61,6 +61,7 @@ var (
 
 	config = map[string]string{
 		"GOELEVEN_HSMLIB":        "",
+		"GOELEVEN_USERTYPE":      "crypto_user",
 		"GOELEVEN_INTERFACE":     "localhost:8080",
 		"GOELEVEN_ALLOWEDIP":     "127.0.0.1",
 		"GOELEVEN_SERIALNUMBER":  "",
@@ -72,6 +73,11 @@ var (
 		"GOELEVEN_HTTPS_KEY":     "false",
 		"GOELEVEN_HTTPS_CERT":    "false",
 	}
+
+    usertype = map[string]uint{
+        "crypto_officer":  pkcs11.CKU_USER, // safenet crypto_officer maps to CKU.USER !!!
+        "crypto_user":  0x8000001, // safenet extension
+    }
 
 	methods = map[string]uint{
 		"CKM_SHA1_RSA_PKCS":   pkcs11.CKM_SHA1_RSA_PKCS,
@@ -457,7 +463,7 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-	e = p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
+	e = p.Login(session, usertype[config["GOELEVEN_USERTYPE"]], config["GOELEVEN_SLOT_PASSWORD"])
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())

@@ -103,6 +103,11 @@ var (
 	}
 
 	src = rand.NewSource(time.Now().UnixNano())
+
+	fatalerrors = map[uint]bool{
+    	pkcs11.CKR_DEVICE_ERROR: true,
+    	pkcs11.CKR_KEY_HANDLE_INVALID: true,
+	}
 )
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -461,7 +466,7 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-	e = p.Login(session, usertype[config["GOELEVEN_USERTYPE"]], config["GOELEVEN_SLOT_PASSWORD"])
+	e = p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())
@@ -479,15 +484,9 @@ func sign(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error) {
 	defer func() {sem <- s}()
 
 	err = p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil {
-		log.Fatalf("SignInit failed: %v, %s\n", methods[parms.Mech], err.Error())
-	}
+    handlefatalerror(err)
 	sig, err := p.Sign(s.session, data)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
-		log.Fatalf("%s\n", err.Error())
-	}
+    handlefatalerror(err)
 
 	return sig, err
 }
@@ -516,15 +515,9 @@ func encrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error
 	defer func() {sem <- s}()
 
 	err = p.EncryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
-		log.Fatalf("%s\n", err.Error())
-	}
+    handlefatalerror(err)
 	plain, err := p.Encrypt(s.session, data)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
-		log.Fatalf("%s\n", err.Error())
-	}
+    handlefatalerror(err)
 
 	return plain, err
 }
@@ -556,15 +549,14 @@ func decrypt(data []byte, parms request, key pkcs11.ObjectHandle) ([]byte, error
 	defer func() {sem <- s}()
 
 	err = p.DecryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
-		log.Fatalf("%s\n", err.Error())
-	}
+    handlefatalerror(err)
 	plain, err := p.Decrypt(s.session, data)
-	// give up on 0x30: CKR_DEVICE_ERROR - HSM unreachable via network
-	if err != nil && uint(err.(pkcs11.Error)) == 0x30 {
-		log.Fatalf("%s\n", err.Error())
+    handlefatalerror(err)
+	return plain, err
 	}
 
-	return plain, err
+func handlefatalerror(err error) {
+    if err != nil && fatalerrors[uint(err.(pkcs11.Error))] {
+		log.Fatalf("goeleven FATAL error: %s\n", err.Error())
+    }
 }

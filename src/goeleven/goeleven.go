@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/facebookgo/grace/gracehttp"
 	"github.com/wayf-dk/pkcs11"
 	"io/ioutil"
 	"log"
@@ -137,8 +136,7 @@ func main() {
 	http.HandleFunc("/", handler)
 	var err error
 	if config["GOELEVEN_HTTPS_CERT"] == "false" {
-		gracehttp.Serve(
-			&http.Server{Addr: config["GOELEVEN_INTERFACE"], Handler: Log(http.DefaultServeMux)})
+		err = http.ListenAndServe(config["GOELEVEN_INTERFACE"], Log(http.DefaultServeMux))
 	} else {
 		err = http.ListenAndServeTLS(config["GOELEVEN_INTERFACE"], config["GOELEVEN_HTTPS_CERT"], config["GOELEVEN_HTTPS_KEY"], nil)
 	}

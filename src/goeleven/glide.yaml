@@ -1,0 +1,3 @@
+package: goeleven
+import:
+- package: github.com/miekg/pkcs11

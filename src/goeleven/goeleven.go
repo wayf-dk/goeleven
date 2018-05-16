@@ -78,7 +78,7 @@ var (
 
 	usertype = map[string]uint{
 		"crypto_officer": pkcs11.CKU_USER, // safenet crypto_officer maps to CKU.USER !!!
-		"crypto_user":    0x8000001,       // safenet extension
+		"crypto_user":    0x80000001,      // safenet extension
 	}
 
 	methods = map[string]uint{

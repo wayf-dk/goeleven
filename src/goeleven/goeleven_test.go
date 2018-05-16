@@ -9,7 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/wayf-dk/pkcs11"
+	"github.com/miekg/pkcs11"
 	"net/http"
 	"net/http/httptest"
 	"time"

@@ -484,7 +484,7 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-	e = p.Login(session, pkcs11.CKU_USER, config["GOELEVEN_SLOT_PASSWORD"])
+	e = p.Login(session, usertype[config["GOELEVEN_USERTYPE"]], config["GOELEVEN_SLOT_PASSWORD"])
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())

@@ -504,7 +504,8 @@ func Dispatch(req string, params Request) (res []byte, err error) {
 		return
 	}
 	key := keymap[strings.Split(u.Path, "/")[2]].handle
-	return operations[params.Function](data, params, key)
+	res, err =  operations[params.Function](data, params, key)
+	return
 }
 
 // TODO: Cleanup

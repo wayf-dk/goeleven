@@ -241,7 +241,7 @@ func prepareobjects(labels string) (err error) {
 	// String->int64->int convert
 	var s Hsm
 	err = p.Initialize()
-	defer p.Finalize()
+	//defer p.Finalize()
 
 	slots, e := p.GetSlotList(true)
 	if e != nil {
@@ -261,8 +261,8 @@ func prepareobjects(labels string) (err error) {
 	if err != nil {
 		return
 	}
-	defer p.CloseSession(s.session)
-	defer p.Logout(s.session)
+	//defer p.CloseSession(s.session)
+	//defer p.Logout(s.session)
 
 	keys := strings.Split(labels, ",")
 
@@ -458,10 +458,12 @@ func RandStringBytesMaskImprSrc(n int) []byte {
 }
 
 func initpkcs11lib() {
+/*
 	err := p.Initialize()
 	for err != nil {
 		log.Fatal("Failed to initialize pkcs11")
 	}
+*/
 
 	for currentsessions := 0; currentsessions < maxsessions; currentsessions++ {
 		s, _ := initsession()

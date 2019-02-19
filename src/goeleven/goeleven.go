@@ -458,12 +458,12 @@ func RandStringBytesMaskImprSrc(n int) []byte {
 }
 
 func initpkcs11lib() {
-/*
-	err := p.Initialize()
-	for err != nil {
-		log.Fatal("Failed to initialize pkcs11")
-	}
-*/
+	/*
+		err := p.Initialize()
+		for err != nil {
+			log.Fatal("Failed to initialize pkcs11")
+		}
+	*/
 
 	for currentsessions := 0; currentsessions < maxsessions; currentsessions++ {
 		s, _ := initsession()
@@ -506,7 +506,7 @@ func Dispatch(req string, params Request) (res []byte, err error) {
 		return
 	}
 	key := keymap[strings.Split(u.Path, "/")[2]].handle
-	res, err =  operations[params.Function](data, params, key)
+	res, err = operations[params.Function](data, params, key)
 	return
 }
 

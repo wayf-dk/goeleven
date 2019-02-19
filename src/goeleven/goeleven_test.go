@@ -30,7 +30,7 @@ func init() {
 
 func ExampleSignError() {
 
-	params := request{
+	params := Request{
 		"vMx1C2EMvOL6WubL+O48hcPUiDAXXrOonK/6o83LVhVCeCu/Vm567gyUzppUiC/egjeZg0JUh5GhFYVups1DM8n8H9zzTJjDvW5yfRwx3+EEnhLazjESokgKjykURJfQE487cEnyPyjcSe89McyBA92dhRlCUoSxfs17UjRptKcNm/5WOEQ4ahHyTnD7UnBOA2CMNUkRUEUzTF8FRF8bmMFzKXPpgC3K5CdmHC4z7hY9ThANfsfo2HOAFsTLOvfkeH3ZxJVg5dL28wZjsG9zV/2nfjFrkK8OoSm0GXa4wNPsstOHckLCcgBAOqYvk9P3UqWk8vBIUE5lWGOiW91qAA==",
 		//        "aGVqbWVkZGlnCg==",
 		"CKM_RSA_PKCS",
@@ -56,7 +56,7 @@ func ExampleSignError() {
 
 func ExampleSign() {
 
-	params := request{
+	params := Request{
 		"aGVqbWVkZGlnCg==",
 		"CKM_RSA_PKCS",
 		"",
@@ -95,7 +95,7 @@ func ExampleDecrypt() {
 
 	cipher := base64.StdEncoding.EncodeToString(ciphertext)
 
-	params := request{
+	params := Request{
 		cipher,
 		"CKM_RSA_PKCS_OAEP",
 		"CKM_SHA_1",

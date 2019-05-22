@@ -426,16 +426,20 @@ func statushandler(w http.ResponseWriter, r *http.Request) {
 	contextmutex.RLock()
 	ctx := context[r]
 	contextmutex.RUnlock()
-
-	// signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
-	data := []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
-	data = append(data, RandStringBytesMaskImprSrc(40)...)
-	b := Request{Mech: "CKM_RSA_PKCS"}
-	_, err := Sign(data, b, keymap["wildcard.test.lan.key"].handle)
+    err := HSMStatus()
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
 		return
 	}
+}
+
+func HSMStatus() (err error) {
+	// signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
+	data := []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
+	data = append(data, RandStringBytesMaskImprSrc(40)...)
+	b := Request{Mech: "CKM_RSA_PKCS"}
+	_, err = Sign(data, b, keymap["wildcard.test.lan.key"].handle)
+	return
 }
 
 // Make a random string - from http://stackoverflow.com/a/31832326

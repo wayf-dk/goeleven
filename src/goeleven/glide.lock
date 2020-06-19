@@ -1,6 +1,0 @@
-hash: 0b86fa860d834ecb5ff216dcaefdaeefc3ff351d83962e02986c495cbeeb5a61
-updated: 2016-07-04T14:17:16.629150335Z
-imports:
-- name: github.com/miekg/pkcs11
-  version: 8f7ddbc1334cfd2fd0d6e52de6bd823444862c82
-devImports: []

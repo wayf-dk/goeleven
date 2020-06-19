@@ -250,7 +250,7 @@ func prepareobjects(labels string) (err error) {
 
 	for _, s := range slots {
 		tokeninfo, _ := p.GetTokenInfo(s)
-		if tokeninfo.SerialNumber == config["GOELEVEN_SERIALNUMBER"] || tokeninfo.Label == config["GOELEVEN_SERIALNUMBER"] { // tokeninfo.SerialNumber is string
+		if tokeninfo.Label == config["GOELEVEN_SLOT"] { // tokeninfo.SerialNumber is string
 			slot = s
 			log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
 			break
@@ -426,7 +426,7 @@ func statushandler(w http.ResponseWriter, r *http.Request) {
 	contextmutex.RLock()
 	ctx := context[r]
 	contextmutex.RUnlock()
-    err := HSMStatus()
+	err := HSMStatus()
 	if err != nil {
 		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
 		return

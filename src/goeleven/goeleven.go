@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/miekg/pkcs11"
-	"github.com/y0ssar1an/q"
+	"q"
 	//"github.com/wayf-dk/pkcs11"
 	"io/ioutil"
 	"log"

@@ -51,7 +51,6 @@ type Request struct {
 }
 
 var (
-	_            = q.Q
 	contextmutex sync.RWMutex
 	context      = make(map[*http.Request]map[string]string)
 

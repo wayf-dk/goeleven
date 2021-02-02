@@ -27,7 +27,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
 )
@@ -50,10 +49,11 @@ type Request struct {
 	Sharedkey string `json:"sharedkey"`
 }
 
-var (
-	contextmutex sync.RWMutex
-	context      = make(map[*http.Request]map[string]string)
+type (
+	appHandler func(http.ResponseWriter, *http.Request) error
+)
 
+var (
 	maxsessions int
 	p           *pkcs11.Ctx
 	sem         chan Hsm
@@ -69,9 +69,6 @@ var (
 		"GOELEVEN_SLOT_PASSWORD": "",
 		"GOELEVEN_KEY_LABEL":     "",
 		"GOELEVEN_MAXSESSIONS":   "1",
-		"SOFTHSM_CONF":           "softhsm.conf",
-		"GOELEVEN_HTTPS_KEY":     "false",
-		"GOELEVEN_HTTPS_CERT":    "false",
 	}
 
 	usertype = map[string]uint{
@@ -120,11 +117,6 @@ const (
 )
 
 func Main() {
-	//	logwriter, e := syslog.New(syslog.LOG_NOTICE, "goeleven")
-	//	if e == nil {
-	//		log.SetOutput(logwriter)
-	//	}
-
 	keymap = make(map[string]aclmap)
 	slotmap = make(map[string]pkcs11.ObjectHandle)
 
@@ -133,19 +125,16 @@ func Main() {
 	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
 
 	// sem must not be nil as this will block forever all clients that tries to read before
-	// clients are made available in sem asyncroniously as they become ready in initpkcs11lib
+	// clients are made available in sem asynchronously as they become ready in initpkcs11lib
 	sem = make(chan Hsm, maxsessions)
 
 	bginit()
 
-	http.HandleFunc("/status", statushandler)
-	http.HandleFunc("/", handler)
-	var err error
-	if config["GOELEVEN_HTTPS_CERT"] == "false" {
-		err = http.ListenAndServe(config["GOELEVEN_INTERFACE"], Log(http.DefaultServeMux))
-	} else {
-		err = http.ListenAndServeTLS(config["GOELEVEN_INTERFACE"], config["GOELEVEN_HTTPS_CERT"], config["GOELEVEN_HTTPS_KEY"], nil)
-	}
+	http.Handle("/status", appHandler(statushandler))
+	http.Handle("/", appHandler(handler))
+
+    err := http.ListenAndServe(config["GOELEVEN_INTERFACE"], http.DefaultServeMux)
+
 	if err != nil {
 		log.Printf("main(): %s\n", err)
 	}
@@ -181,27 +170,6 @@ tryagain:
     log.Printf("initpkcs11lib")
 
 	go initpkcs11lib()
-}
-
-func Log(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contextmutex.Lock()
-		ctx := make(map[string]string)
-		context[r] = ctx
-		contextmutex.Unlock()
-		starttime := time.Now()
-		handler.ServeHTTP(w, r)
-
-		status := 200
-		if ctx["err"] != "" {
-			status = 500
-		}
-		log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), len(sem), cap(sem), status, ctx["err"])
-
-		contextmutex.Lock()
-		delete(context, r)
-		contextmutex.Unlock()
-	})
 }
 
 // initConfig read several Environment variables and based on them initialise the configuration
@@ -322,25 +290,25 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
 	return nil
 }
 
-// Utility to get correct error in log, while just sending generic 500 to client
-func logandsenderror(w http.ResponseWriter, err string, context map[string]string) {
-	context["err"] = err
-	http.Error(w, "Invalid Input", 500)
+func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+		starttime := time.Now()
+		err := fn(w, r)
+		status := 200
+		if err != nil {
+			status = 500
+		} else {
+		    err = fmt.Errorf("OK")
+	    }
+		log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), len(sem), cap(sem), status, err)
 }
 
-// TODO: Cleanup
-// TODO: Documentation
-// TODO: Error handling
 /*
  * If error then send HTTP 500 to client and keep the server running
  *
  */
-func handler(w http.ResponseWriter, r *http.Request) {
+func handler(w http.ResponseWriter, r *http.Request) (err error) {
 
 	defer r.Body.Close()
-	contextmutex.RLock()
-	ctx := context[r]
-	contextmutex.RUnlock()
 
 	ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
 	ip := strings.Split(r.RemoteAddr, ":")
@@ -350,18 +318,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !allowed {
-		logandsenderror(w, "Unauthorised access attempt", ctx)
-		return
+		return fmt.Errorf("Unauthorised access attempt")
 	}
 
 	// handle non ok urls gracefully
-	var err error
 	var validPath = regexp.MustCompile("^/([a-zA-Z0-9\\.]+)/([-a-zA-Z0-9\\.]+)$")
-	log.Printf("url: %v\n", r.URL.Path)
+	//log.Printf("url: %v\n", r.URL.Path)
 	match := validPath.FindStringSubmatch(r.URL.Path)
 	if match == nil {
-		logandsenderror(w, "Invalid path", ctx)
-		return
+		return fmt.Errorf("Invalid path")
 	}
 
 	mSlotAlias := match[1]
@@ -373,27 +338,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	err = json.Unmarshal(body, &b)
 	if err != nil {
-		logandsenderror(w, fmt.Sprintf("json.unmarshall: %v", err.Error()), ctx)
 		return
 	}
-	log.Printf("req: %v\n", b)
+	//log.Printf("req: %v\n", b)
 
 	data, err := base64.StdEncoding.DecodeString(b.Data)
 
 	if err != nil {
-		logandsenderror(w, fmt.Sprintf("DecodeString: %v", err.Error()), ctx)
 		return
 	}
 
 	if len(data) == 0 {
-		logandsenderror(w, "empty payload", ctx)
-		return
+		return fmt.Errorf("empty payload")
 	}
 
 	// Client auth
 	err = authClient(b.Sharedkey, mSlotAlias, mKeyAlias, b.Mech)
 	if err != nil {
-		logandsenderror(w, fmt.Sprintf("authClient: %v", err.Error()), ctx)
 		return
 	}
 
@@ -401,7 +362,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	sig, err := operations[b.Function]([]byte(data), b, key)
 	if err != nil {
-		logandsenderror(w, fmt.Sprintf("%s error: %s", b.Function, err.Error()), ctx)
 		return
 	}
 
@@ -413,24 +373,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	res := Res{result}
 	json, err := json.Marshal(res)
 	if err != nil {
-		logandsenderror(w, fmt.Sprintf("json.marshall: %s", err.Error()), ctx)
 		return
 	}
 
 	fmt.Fprintf(w, "%s\n\n", json)
 	r.Body.Close()
+	return
 }
 
-func statushandler(w http.ResponseWriter, r *http.Request) {
+func statushandler(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
-	contextmutex.RLock()
-	ctx := context[r]
-	contextmutex.RUnlock()
-	err := HSMStatus()
-	if err != nil {
-		logandsenderror(w, fmt.Sprintf("signing error: %s", err.Error()), ctx)
-		return
-	}
+	err = HSMStatus()
+    return
 }
 
 func HSMStatus() (err error) {
@@ -438,7 +392,11 @@ func HSMStatus() (err error) {
 	data := []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
 	data = append(data, RandStringBytesMaskImprSrc(40)...)
 	b := Request{Mech: "CKM_RSA_PKCS"}
-	_, err = Sign(data, b, keymap["metadata.2016.signing.key"].handle)
+
+	for _, key := range keymap { // just use one of the keys
+    	_, err = Sign(data, b, key.handle)
+	    break
+	}
 	return
 }
 

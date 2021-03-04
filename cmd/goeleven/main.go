@@ -6,5 +6,5 @@ import (
 )
 
 func main() {
-	goeleven.Main(config.ElevenPHPH)
+	goeleven.Main(config.GoElevenPHPH)
 }

@@ -14,67 +14,46 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"example.com/hybrid-config"
 	"fmt"
 	"github.com/miekg/pkcs11"
-	//"github.com/wayf-dk/pkcs11"
 	"io/ioutil"
 	"log"
-	//	"log/syslog"
 	"math/rand"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unsafe"
 )
 
-type Hsm struct {
-	session pkcs11.SessionHandle
-}
-
-type aclmap struct {
-	handle       pkcs11.ObjectHandle
-	sharedsecret string
-	label        string
-}
-
-type Request struct {
-	Data      string `json:"data"`
-	Mech      string `json:"mech"`
-	Digest    string `json:"digest"`
-	Function  string `json:"function"`
-	Sharedkey string `json:"sharedkey"`
-}
-
 type (
+	Hsm struct {
+		session pkcs11.SessionHandle
+	}
+
+	aclmap struct {
+		handle       pkcs11.ObjectHandle
+		sharedsecret string
+		label        string
+	}
+
+	Request struct {
+		Data      string `json:"data"`
+		Mech      string `json:"mech"`
+		Digest    string `json:"digest"`
+		Function  string `json:"function"`
+		Sharedkey string `json:"sharedkey"`
+	}
+
 	appHandler func(http.ResponseWriter, *http.Request) error
 )
 
 var (
-	maxsessions int
-	p           *pkcs11.Ctx
-	sem         chan Hsm
-	slot        uint
-
-	config = map[string]string{
-		"GOELEVEN_HSMLIB":        "",
-		"GOELEVEN_USERTYPE":      "crypto_user",
-		"GOELEVEN_INTERFACE":     "localhost:8080",
-		"GOELEVEN_ALLOWEDIP":     "127.0.0.1",
-		"GOELEVEN_SERIALNUMBER":  "",
-		"GOELEVEN_SLOT":          "",
-		"GOELEVEN_SLOT_PASSWORD": "",
-		"GOELEVEN_KEY_LABEL":     "",
-		"GOELEVEN_MAXSESSIONS":   "1",
-	}
-
-	usertype = map[string]uint{
-		"crypto_officer": pkcs11.CKU_USER, // safenet crypto_officer maps to CKU.USER !!!
-		"crypto_user":    0x80000001,      // safenet extension
-	}
+	p    *pkcs11.Ctx
+	sem  chan Hsm
+	slot uint
 
 	methods = map[string]uint{
 		"CKM_SHA1_RSA_PKCS":   pkcs11.CKM_SHA1_RSA_PKCS,
@@ -106,100 +85,61 @@ var (
 		pkcs11.CKR_DEVICE_ERROR:       true,
 		pkcs11.CKR_KEY_HANDLE_INVALID: true,
 	}
-)
 
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	config hybridconfig.GoElevenConfig
+)
 
 const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+	letterBytes    = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	letterIdxBits  = 6                    // 6 bits to represent a letter index
+	letterIdxMask  = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax   = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+
+	crypto_officer = pkcs11.CKU_USER      // safenet crypto_officer maps to CKU.USER !!!
+	crypto_user    = 0x80000001           // safenet extension
 )
 
-func Main() {
+func Main(c hybridconfig.GoElevenConfig) {
+	if c.SlotPassword == "" {
+		return
+	}
+	config = c
 	keymap = make(map[string]aclmap)
 	slotmap = make(map[string]pkcs11.ObjectHandle)
 
-	initConfig()
-
-	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
+	p = pkcs11.New(config.HsmLib)
 
 	// sem must not be nil as this will block forever all clients that tries to read before
 	// clients are made available in sem asynchronously as they become ready in initpkcs11lib
-	sem = make(chan Hsm, maxsessions)
+	sem = make(chan Hsm, config.MaxSessions)
 
 	bginit()
 
-	http.Handle("/status", appHandler(statushandler))
-	http.Handle("/", appHandler(handler))
+	if config.Intf != "" {
+		http.Handle("/status", appHandler(statushandler))
+		http.Handle("/", appHandler(handler))
 
-    err := http.ListenAndServe(config["GOELEVEN_INTERFACE"], http.DefaultServeMux)
+		err := http.ListenAndServe(config.Intf, http.DefaultServeMux)
 
-	if err != nil {
-		log.Printf("main(): %s\n", err)
+		if err != nil {
+			log.Printf("main(): %s\n", err)
+		}
+		log.Printf("after ListenAndServer\n")
 	}
-	log.Printf("after ListenAndServer\n")
-}
-
-func LibraryInit(newconfig map[string]string) {
-	config = newconfig
-	keymap = make(map[string]aclmap)
-	slotmap = make(map[string]pkcs11.ObjectHandle)
-	max, _ := strconv.ParseInt(config["GOELEVEN_MAXSESSIONS"], 10, 0)
-	maxsessions = int(max)
-
-	p = pkcs11.New(config["GOELEVEN_HSMLIB"])
-
-	// sem must not be nil as this will block forever all clients that tries to read before
-	// clients are made available in sem asyncroniously as they become ready in initpkcs11lib
-	sem = make(chan Hsm, maxsessions)
-
-	bginit()
 }
 
 func bginit() {
 tryagain:
 	for {
-		if err := prepareobjects(config["GOELEVEN_KEY_LABEL"]); err != nil {
+		if err := prepareobjects(config.KeyLabels); err != nil {
 			log.Printf("Waiting for HSM\n")
 			time.Sleep(5 * time.Second)
 			continue tryagain
 		}
 		break
 	}
-    log.Printf("initpkcs11lib")
-
+	log.Printf("initpkcs11lib")
 	go initpkcs11lib()
-}
-
-// initConfig read several Environment variables and based on them initialise the configuration
-func initConfig() {
-	envFiles := []string{"GOELEVEN_HSMLIB"}
-
-	// Load all Environments variables
-	for k, _ := range config {
-		if os.Getenv(k) != "" {
-			config[k] = os.Getenv(k)
-		}
-	}
-	// All variable MUST have a value but we can not verify the variable content
-	for k, v := range config {
-		// Don't write PASSWORD to debug
-		if k == "GOELEVEN_SLOT_PASSWORD" || k == "GOELEVEN_KEY_LABEL" {
-			v = "xxx"
-		}
-		log.Printf("%v: %v\n", k, v)
-	}
-
-	// Check file exists
-	for _, v := range envFiles {
-		_, err := os.Stat(config[v])
-		if err != nil {
-			log.Panicf("%s %s", v, err.Error())
-		}
-	}
-	max, _ := strconv.ParseInt(config["GOELEVEN_MAXSESSIONS"], 10, 0)
-	maxsessions = int(max)
 }
 
 // Prepareobjects returns a map of the label to object id for the given labels.
@@ -218,7 +158,7 @@ func prepareobjects(labels string) (err error) {
 
 	for _, s := range slots {
 		tokeninfo, _ := p.GetTokenInfo(s)
-		if tokeninfo.Label == config["GOELEVEN_SLOT"] { // tokeninfo.SerialNumber is string
+		if tokeninfo.Label == config.Slot { // tokeninfo.SerialNumber is string
 			slot = s
 			log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
 			break
@@ -274,7 +214,7 @@ func prepareobjects(labels string) (err error) {
 func authClient(sharedkey string, slot string, keylabel string, mech string) error {
 	//  Check sharedkey
 	//  Check slot nummer
-	if slot != config["GOELEVEN_SLOT"] {
+	if slot != config.Slot {
 		return errors.New("Slot number does not match")
 	}
 	//  Check key aliases/label
@@ -291,15 +231,15 @@ func authClient(sharedkey string, slot string, keylabel string, mech string) err
 }
 
 func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-		starttime := time.Now()
-		err := fn(w, r)
-		status := 200
-		if err != nil {
-			status = 500
-		} else {
-		    err = fmt.Errorf("OK")
-	    }
-		log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), len(sem), cap(sem), status, err)
+	starttime := time.Now()
+	err := fn(w, r)
+	status := 200
+	if err != nil {
+		status = 500
+	} else {
+		err = fmt.Errorf("OK")
+	}
+	log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), len(sem), cap(sem), status, err)
 }
 
 /*
@@ -310,7 +250,7 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 
 	defer r.Body.Close()
 
-	ips := strings.Split(config["GOELEVEN_ALLOWEDIP"], ",")
+	ips := strings.Split(config.AllowedIP, ",")
 	ip := strings.Split(r.RemoteAddr, ":")
 	var allowed bool
 	for _, v := range ips {
@@ -384,7 +324,7 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 func statushandler(w http.ResponseWriter, r *http.Request) (err error) {
 	defer r.Body.Close()
 	err = HSMStatus()
-    return
+	return
 }
 
 func HSMStatus() (err error) {
@@ -394,8 +334,8 @@ func HSMStatus() (err error) {
 	b := Request{Mech: "CKM_RSA_PKCS"}
 
 	for _, key := range keymap { // just use one of the keys
-    	_, err = Sign(data, b, key.handle)
-	    break
+		_, err = Sign(data, b, key.handle)
+		break
 	}
 	return
 }
@@ -427,7 +367,7 @@ func initpkcs11lib() {
 		}
 	*/
 
-	for currentsessions := 0; currentsessions < maxsessions; currentsessions++ {
+	for currentsessions := 0; currentsessions < config.MaxSessions; currentsessions++ {
 		s, _ := initsession()
 		// need to call FindObjectsInit to be able to use objects in ha partition
 		template := []*pkcs11.Attribute{}
@@ -435,7 +375,7 @@ func initpkcs11lib() {
 		sem <- s
 	}
 
-	log.Printf("initialized goeleven %d sessions\n", maxsessions)
+	log.Printf("initialized goeleven %d sessions\n", config.MaxSessions)
 }
 
 // TODO: Cleanup
@@ -448,7 +388,7 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-	e = p.Login(session, usertype[config["GOELEVEN_USERTYPE"]], config["GOELEVEN_SLOT_PASSWORD"])
+	e = p.Login(session, crypto_user, config.SlotPassword)
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())

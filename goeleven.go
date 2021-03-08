@@ -14,7 +14,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"example.com/hybrid-config"
 	"fmt"
 	"github.com/miekg/pkcs11"
 	"io/ioutil"
@@ -26,6 +25,7 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+	"x.config"
 )
 
 type (
@@ -86,40 +86,40 @@ var (
 		pkcs11.CKR_KEY_HANDLE_INVALID: true,
 	}
 
-	config hybridconfig.GoElevenConfig
+	conf config.GoElevenConfig
 )
 
 const (
-	letterBytes    = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	letterIdxBits  = 6                    // 6 bits to represent a letter index
-	letterIdxMask  = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax   = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+	letterBytes   = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
 
-	crypto_officer = pkcs11.CKU_USER      // safenet crypto_officer maps to CKU.USER !!!
-	crypto_user    = 0x80000001           // safenet extension
+	crypto_officer = pkcs11.CKU_USER // safenet crypto_officer maps to CKU.USER !!!
+	crypto_user    = 0x80000001      // safenet extension
 )
 
-func Main(c hybridconfig.GoElevenConfig) {
+func Init(c config.GoElevenConfig) {
 	if c.SlotPassword == "" {
 		return
 	}
-	config = c
+	conf = c
 	keymap = make(map[string]aclmap)
 	slotmap = make(map[string]pkcs11.ObjectHandle)
 
-	p = pkcs11.New(config.HsmLib)
+	p = pkcs11.New(conf.HsmLib)
 
 	// sem must not be nil as this will block forever all clients that tries to read before
 	// clients are made available in sem asynchronously as they become ready in initpkcs11lib
-	sem = make(chan Hsm, config.MaxSessions)
+	sem = make(chan Hsm, conf.MaxSessions)
 
 	bginit()
 
-	if config.Intf != "" {
+	if conf.Intf != "" {
 		http.Handle("/status", appHandler(statushandler))
 		http.Handle("/", appHandler(handler))
 
-		err := http.ListenAndServe(config.Intf, http.DefaultServeMux)
+		err := http.ListenAndServe(conf.Intf, http.DefaultServeMux)
 
 		if err != nil {
 			log.Printf("main(): %s\n", err)
@@ -131,7 +131,7 @@ func Main(c hybridconfig.GoElevenConfig) {
 func bginit() {
 tryagain:
 	for {
-		if err := prepareobjects(config.KeyLabels); err != nil {
+		if err := prepareobjects(conf.KeyLabels); err != nil {
 			log.Printf("Waiting for HSM\n")
 			time.Sleep(5 * time.Second)
 			continue tryagain
@@ -158,7 +158,7 @@ func prepareobjects(labels string) (err error) {
 
 	for _, s := range slots {
 		tokeninfo, _ := p.GetTokenInfo(s)
-		if tokeninfo.Label == config.Slot { // tokeninfo.SerialNumber is string
+		if tokeninfo.Label == conf.Slot { // tokeninfo.SerialNumber is string
 			slot = s
 			log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
 			break
@@ -214,7 +214,7 @@ func prepareobjects(labels string) (err error) {
 func authClient(sharedkey string, slot string, keylabel string, mech string) error {
 	//  Check sharedkey
 	//  Check slot nummer
-	if slot != config.Slot {
+	if slot != conf.Slot {
 		return errors.New("Slot number does not match")
 	}
 	//  Check key aliases/label
@@ -250,7 +250,7 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 
 	defer r.Body.Close()
 
-	ips := strings.Split(config.AllowedIP, ",")
+	ips := strings.Split(conf.AllowedIP, ",")
 	ip := strings.Split(r.RemoteAddr, ":")
 	var allowed bool
 	for _, v := range ips {
@@ -367,7 +367,7 @@ func initpkcs11lib() {
 		}
 	*/
 
-	for currentsessions := 0; currentsessions < config.MaxSessions; currentsessions++ {
+	for currentsessions := 0; currentsessions < conf.MaxSessions; currentsessions++ {
 		s, _ := initsession()
 		// need to call FindObjectsInit to be able to use objects in ha partition
 		template := []*pkcs11.Attribute{}
@@ -375,7 +375,7 @@ func initpkcs11lib() {
 		sem <- s
 	}
 
-	log.Printf("initialized goeleven %d sessions\n", config.MaxSessions)
+	log.Printf("initialized goeleven %d sessions\n", conf.MaxSessions)
 }
 
 // TODO: Cleanup
@@ -388,7 +388,7 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-	e = p.Login(session, crypto_user, config.SlotPassword)
+	e = p.Login(session, crypto_user, conf.SlotPassword)
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())

@@ -2,9 +2,10 @@ package main
 
 import (
 	"github.com/wayf-dk/goeleven"
-	config "example.com/hybrid-config"
+	config "wayf.dk/hybrid-config"
 )
 
 func main() {
-	goeleven.Main(config.GoElevenPHPH)
+    config.GoElevenPHPH.SlotPassword = config.Env("SlotPassword", "")
+	goeleven.Init(config.GoElevenPHPH)
 }

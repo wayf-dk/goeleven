@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/miekg/pkcs11"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -25,6 +24,8 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+
+	"github.com/miekg/pkcs11"
 	"x.config"
 )
 

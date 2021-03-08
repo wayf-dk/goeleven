@@ -2,7 +2,7 @@ package main
 
 import (
 	"github.com/wayf-dk/goeleven"
-	config "wayf.dk/hybrid-config"
+	x.config"
 )
 
 func main() {

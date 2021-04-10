@@ -389,8 +389,8 @@ func initsession() (Hsm, error) {
 		log.Fatalf("Failed to open session: %s\n", e.Error())
 	}
 
-//	e = p.Login(session, crypto_user, conf.SlotPassword)
-	e = p.Login(session, crypto_officer, conf.SlotPassword)
+	e = p.Login(session, crypto_user, conf.SlotPassword)
+//	e = p.Login(session, crypto_officer, conf.SlotPassword)
 
 	if e != nil {
 		log.Printf("Failed to login to session: %s\n", e.Error())

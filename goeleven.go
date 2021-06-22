@@ -109,6 +109,9 @@ func Init(c config.GoElevenConfig) {
 	slotmap = make(map[string]pkcs11.ObjectHandle)
 
 	p = pkcs11.New(conf.HsmLib)
+    if p == nil {
+    	log.Fatal("No cryptoki lib available")
+    }
 
 	// sem must not be nil as this will block forever all clients that tries to read before
 	// clients are made available in sem asynchronously as they become ready in initpkcs11lib

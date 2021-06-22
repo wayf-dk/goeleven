@@ -404,6 +404,9 @@ func initsession() (Hsm, error) {
 }
 
 func Dispatch(req string, params Request) (res []byte, err error) {
+    if p == nil {
+	    return nil, fmt.Errorf("goeleven not initialized")
+    }
 	u, err := url.Parse(req)
 	if err != nil {
 		return

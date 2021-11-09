@@ -2,10 +2,10 @@ package main
 
 import (
 	"github.com/wayf-dk/goeleven"
-	x.config"
+	"x.config"
 )
 
 func main() {
-    config.GoElevenPHPH.SlotPassword = config.Env("SlotPassword", "")
+	config.Init()
 	goeleven.Init(config.GoElevenPHPH)
 }

@@ -266,7 +266,7 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	// handle non ok urls gracefully
-	var validPath = regexp.MustCompile("^/([a-zA-Z0-9\\.]+)/([-a-zA-Z0-9\\.]+)$")
+	var validPath = regexp.MustCompile("^/([a-zA-Z0-9\\.-]+)/([-a-zA-Z0-9\\.]+)$")
 	//log.Printf("url: %v\n", r.URL.Path)
 	match := validPath.FindStringSubmatch(r.URL.Path)
 	if match == nil {

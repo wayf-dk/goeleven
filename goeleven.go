@@ -483,7 +483,7 @@ func Decrypt(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error
 	params := (*oaepParams)(unsafe.Pointer(&buf[0]))
 
 	params.hashAlg = methods[parms.Digest]
-	params.mgf = 1    // CKG_MGF1_SHA1
+	params.mgf = map[uint]uint{pkcs11.CKM_SHA_1 : pkcs11.CKG_MGF1_SHA1, pkcs11.CKM_SHA256: pkcs11.CKG_MGF1_SHA256}[params.hashAlg]
 	params.source = 1 // CKZ_DATA_SPECIFIED
 	params.pSourceData = nil
 	params.ulSourceDataLen = 0

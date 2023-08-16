@@ -63,6 +63,7 @@ var (
 		"CKM_RSA_PKCS_OAEP":   pkcs11.CKM_RSA_PKCS_OAEP,
 		"CKM_SHA_1":           pkcs11.CKM_SHA_1,
 		"CKM_SHA256":          pkcs11.CKM_SHA256,
+		"CKM_RSA_X_509":       pkcs11.CKM_RSA_X_509,
 	}
 
 	keymap map[string]aclmap

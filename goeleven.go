@@ -20,7 +20,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unsafe"
@@ -30,14 +29,16 @@ import (
 )
 
 type (
-	Hsm struct {
-		session pkcs11.SessionHandle
+	keyInfo struct {
+		handle                    pkcs11.ObjectHandle
+		sharedsecret, label, slot string
 	}
 
-	aclmap struct {
-		handle       pkcs11.ObjectHandle
-		sharedsecret string
-		label        string
+	testslot struct {
+		label, site string
+		session     pkcs11.SessionHandle
+		handle      pkcs11.ObjectHandle
+		channel     chan bool
 	}
 
 	Request struct {
@@ -52,9 +53,15 @@ type (
 )
 
 var (
-	p    *pkcs11.Ctx
-	sem  chan Hsm
-	slot uint
+	p             *pkcs11.Ctx
+	sessions      = map[string]chan pkcs11.SessionHandle{}
+	keys          = map[string]keyInfo{}
+	slots         = map[string]uint{}
+	testslots     = []testslot{}
+	HSMStatusData []byte
+	haSlot        string
+	testkey       string
+	allowedIP     []string
 
 	methods = map[string]uint{
 		"CKM_SHA1_RSA_PKCS":   pkcs11.CKM_SHA1_RSA_PKCS,
@@ -64,61 +71,93 @@ var (
 		"CKM_SHA_1":           pkcs11.CKM_SHA_1,
 		"CKM_SHA256":          pkcs11.CKM_SHA256,
 		"CKM_RSA_X_509":       pkcs11.CKM_RSA_X_509,
+		"CKM_EDDSA":           0x80000c03,
 	}
 
-	keymap map[string]aclmap
-
-	slotmap map[string]pkcs11.ObjectHandle
-
-	operations = map[string]func([]byte, Request, pkcs11.ObjectHandle) ([]byte, error){
+	operations = map[string]func([]byte, Request, keyInfo) ([]byte, error){
 		"sign":    Sign,
 		"decrypt": Decrypt,
 		"encrypt": Encrypt,
 	}
 
-	sharedsecretlen = map[string]int{
-		"min": 12,
-		"max": 32,
-	}
-
-	src = rand.NewSource(time.Now().UnixNano())
-
 	fatalerrors = map[uint]bool{
 		pkcs11.CKR_DEVICE_ERROR:       true,
 		pkcs11.CKR_KEY_HANDLE_INVALID: true,
 	}
-
-	conf config.GoElevenConfig
 )
 
 const (
-	letterBytes   = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-
 	crypto_officer = pkcs11.CKU_USER // safenet crypto_officer maps to CKU.USER !!!
 	crypto_user    = 0x80000001      // safenet extension
 )
 
-func Init(c config.GoElevenConfig) {
-	if c.SlotPassword == "" {
+func Init(conf config.GoElevenConfig) {
+	if conf.SlotPassword == "" {
 		return
 	}
-	conf = c
-	keymap = make(map[string]aclmap)
-	slotmap = make(map[string]pkcs11.ObjectHandle)
+
+	log.SetFlags(0) // no predefined time
+	testkey = conf.Testkey
+	allowedIP = strings.Split(conf.AllowedIP, ",")
+
+	const digestMethod = "sha512"
+	buf := make([]byte, config.CryptoMethods[digestMethod].Hash.Size())
+	_, err := rand.Read(buf)
+	if err != nil {
+		panic(err)
+	}
+
+	HSMStatusData = append([]byte(config.CryptoMethods[digestMethod].DerPrefix), buf...)
 
 	p = pkcs11.New(conf.HsmLib)
-    if p == nil {
-    	log.Fatal("No cryptoki lib available")
-    }
+	if p == nil {
+		log.Fatal("No cryptoki lib available")
+	}
+
+	err = p.Initialize()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// sem must not be nil as this will block forever all clients that tries to read before
 	// clients are made available in sem asynchronously as they become ready in initpkcs11lib
-	sem = make(chan Hsm, conf.MaxSessions)
+	for label, slot := range conf.Slots {
+		sessions[label] = make(chan pkcs11.SessionHandle, slot.Sessions)
+	}
 
-	bginit()
+	for label, slot := range conf.Slots { // here we need to be able to handle all slots
+		switch slot.Site {
+		case "ha":
+			haSlot = label
+		}
+		testslots = append(testslots, testslot{label, slot.Site, pkcs11.CKR_SESSION_HANDLE_INVALID, pkcs11.CKR_OBJECT_HANDLE_INVALID, make(chan bool)})
+	}
+
+	if err := prepareobjects(conf); err != nil { // prepare for use of ha slot only
+		log.Fatal(err)
+	}
+
+	go func() {
+		for s := uint(0); s < conf.Slots[haSlot].Sessions; s++ {
+			sess, _ := initsession(slots[haSlot], conf.SlotPassword)
+			sessions[haSlot] <- sess
+		}
+		log.Printf("initialized goeleven slot: %s %d sessions\n", haSlot, conf.Slots[haSlot].Sessions)
+	}()
+
+	//HSMStatus()
+
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		for {
+			<-ticker.C
+			HSMStatus2()
+		}
+	}()
+
+	for _, slot := range testslots {
+		go handleTestslot(slot, conf)
+	}
 
 	if conf.Intf != "" {
 		http.Handle("/status", appHandler(statushandler))
@@ -133,105 +172,160 @@ func Init(c config.GoElevenConfig) {
 	}
 }
 
-func bginit() {
-tryagain:
-	for {
-		if err := prepareobjects(conf.KeyLabels); err != nil {
-			log.Printf("Waiting for HSM\n")
-			time.Sleep(5 * time.Second)
-			continue tryagain
-		}
-		break
-	}
-	log.Printf("initpkcs11lib")
-	go initpkcs11lib()
-}
-
 // Prepareobjects returns a map of the label to object id for the given labels.
 // Returns an error if something goes wrong - the caller is supposed to keep trying
 // until no error is returned
-func prepareobjects(labels string) (err error) {
-	// String->int64->int convert
-	var s Hsm
-	err = p.Initialize()
-	//defer p.Finalize()
+func prepareobjects(conf config.GoElevenConfig) (err error) {
+	// Sessions for initializing key handles, not the global channels of sessions
+	// The key handles are also valid for the sessions created in createSessions
+	sessions := map[string]pkcs11.SessionHandle{}
 
-	slots, e := p.GetSlotList(true)
+	slotlist, e := p.GetSlotList(true)
 	if e != nil {
 		log.Fatalf("slots %s\n", e.Error())
 	}
 
-	for _, s := range slots {
-		tokeninfo, _ := p.GetTokenInfo(s)
-		if tokeninfo.Label == conf.Slot { // tokeninfo.SerialNumber is string
-			slot = s
-			log.Printf("slot: %d %s\n", slot, tokeninfo.Label)
-			break
+	for _, slot := range slotlist {
+		tokeninfo, _ := p.GetTokenInfo(slot)
+		if tokeninfo.Label == haSlot {
+            session, err := initsession(slot, conf.SlotPassword)
+            if err != nil {
+                return err
+            }
+			slots[tokeninfo.Label] = slot
+			sessions[tokeninfo.Label] = session
+			log.Printf("slot: %d %s %s\n", slot, tokeninfo.Label, tokeninfo.SerialNumber)
 		}
 	}
 
-	s, err = initsession()
-	if err != nil {
-		return
-	}
-	//defer p.CloseSession(s.session)
-	//defer p.Logout(s.session)
-
-	keys := strings.Split(labels, ",")
-
-	keylabels := []string{}
-	for _, v := range keys {
-
+	for _, v := range conf.Keys {
 		parts := strings.Split(v, ":")
-		label := parts[0]
-		keylabels = append(keylabels, label)
-		sharedsecret := parts[1]
-		// Test validity of key specific sharedsecret
-		if len(sharedsecret) < sharedsecretlen["min"] || len(sharedsecret) > sharedsecretlen["max"] {
-			log.Panicf("problem with sharedsecret: '%s' for label: '%s'", sharedsecret, label)
+		slotlabel, sharedsecret := parts[0], parts[1]
+		parts = strings.Split(slotlabel, "/")
+		slot, label := parts[1], parts[2] // slotlabel now starts with a /
+		key, err := findPrivatekey(label, sessions[slot])
+		if err != nil {
+			return err
 		}
-
-		template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, label), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
-		if err = p.FindObjectsInit(s.session, template); err != nil {
-			//syscall.Kill(syscall.Getpid(), syscall.SIGUSR2)
-			//panic(fmt.Sprintf("%d Failed to init: %s\n", syscall.Getpid(), e.Error()))
-			return errors.New("")
+		log.Printf("found key: %d %s\n", key, slotlabel)
+		keys[slotlabel] = keyInfo{key, sharedsecret, slotlabel, slot}
+		if keypath := conf.Slots[slot].Keypath; keypath != "" {
+			keys[keypath+label] = keys[slotlabel]
+			log.Printf("found key: %d %s\n", key, keypath+label)
 		}
-		obj, b, e := p.FindObjects(s.session, 2)
-
-		if e != nil {
-			log.Fatalf("Failed to find: %s %v\n", e.Error(), b)
-		}
-		if e := p.FindObjectsFinal(s.session); e != nil {
-			log.Fatalf("Failed to finalize: %s\n", e.Error())
-		}
-		if len(obj) != 1 {
-			log.Fatalf("did not find one (and only one) key with label '%s'", label)
-		}
-		log.Printf("found key: %d %s\n", obj[0], label)
-		keymap[label] = aclmap{obj[0], sharedsecret, label}
 	}
-
 	return
 }
 
+func findPrivatekey(label string, session pkcs11.SessionHandle) (obj pkcs11.ObjectHandle, err error) {
+	template := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_LABEL, label), pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY)}
+	if err = p.FindObjectsInit(session, template); err != nil {
+		return
+	}
+	objs, b, e := p.FindObjects(session, 2)
+	if e != nil {
+		err = errors.New(fmt.Sprintf("Failed to find: %s %v\n", e.Error(), b))
+		return
+	}
+	if e := p.FindObjectsFinal(session); e != nil {
+		err = errors.New(fmt.Sprintf("Failed to FindObjectsFinal: %s\n", e.Error()))
+		return
+	}
+	if len(objs) != 1 {
+		err = errors.New(fmt.Sprintf("did not find one (and only one) key with label '%s'", label))
+		return
+	}
+	return objs[0], err
+}
+
+func createSessions(conf config.GoElevenConfig) {
+	for label, slot := range conf.Slots {
+		for s := uint(0); s < slot.Sessions; s++ {
+			sess, _ := initsession(slots[label], conf.SlotPassword)
+			sessions[label] <- sess
+			log.Println(label, s)
+		}
+		log.Printf("initialized goeleven slot: %s %d sessions\n", label, slot.Sessions)
+	}
+}
+
+// TODO: Cleanup
+// TODO: Documentation
+func initsession(slot uint, password string) (session pkcs11.SessionHandle, err error) {
+	session, err = p.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION)
+
+	if err != nil {
+		return
+	}
+
+	err = p.Login(session, crypto_user, password)
+	//	e = p.Login(session, crypto_officer, conf.SlotPassword)
+
+	if err != nil {
+		return
+	}
+	// need to call FindObjectsInit to be able to use objects in ha partition
+	p.FindObjectsInit(session, []*pkcs11.Attribute{})
+	return
+}
+
+func handleTestslot(theslot testslot, conf config.GoElevenConfig) {
+	ticker := time.NewTicker(30 * time.Second)
+	for {
+		if theslot.session == pkcs11.CKR_SESSION_HANDLE_INVALID {
+		init:
+			for {
+			keeptrying:
+				for {
+					var err error
+					slotlist, _ := p.GetSlotList(true)
+					for _, slot := range slotlist {
+						p.GetSlotInfo(slot) // to re-mount after being off-line
+						tokeninfo, e := p.GetTokenInfo(slot)
+						if e != nil {
+							break keeptrying
+						}
+						if tokeninfo.SerialNumber == theslot.label || tokeninfo.Label == theslot.label {
+							theslot.session, err = initsession(slot, conf.SlotPassword)
+							if err != nil {
+								break keeptrying
+							}
+							theslot.handle, err = findPrivatekey(testkey, theslot.session)
+							if err == nil {
+								break init
+							}
+						}
+					}
+					break keeptrying
+				}
+				<-ticker.C
+			}
+		}
+		err := p.SignInit(theslot.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}, theslot.handle)
+		if err == nil {
+			_, err = p.Sign(theslot.session, HSMStatusData)
+			if err != nil {
+				theslot.session = pkcs11.CKR_SESSION_HANDLE_INVALID
+				continue
+			}
+		}
+		theslot.channel <- true
+	}
+}
+
 // Client authenticate/authorization
-func authClient(sharedkey string, slot string, keylabel string, mech string) error {
-	//  Check sharedkey
-	//  Check slot nummer
-	if slot != conf.Slot {
-		return errors.New("Slot number does not match")
-	}
+func authClient(sharedkey, key string) error {
 	//  Check key aliases/label
-	if _, present := keymap[keylabel]; !present {
-		return errors.New(fmt.Sprintf("Key label does not match %s", keylabel))
+	//  Check sharedkey
+
+	if _, present := keys[key]; !present {
+		return errors.New(fmt.Sprintf("Key label does not match %s", key))
 	}
 
-	if sharedkey != keymap[keylabel].sharedsecret {
-		return errors.New(fmt.Sprintf("Client secret for label: '%s' does not match", keymap[keylabel].label))
+	if sharedkey != keys[key].sharedsecret {
+		return errors.New(fmt.Sprintf("Client secret for label: '%s' does not match", key))
 	}
 
-	// client ok
 	return nil
 }
 
@@ -244,7 +338,7 @@ func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		err = fmt.Errorf("OK")
 	}
-	log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), len(sem), cap(sem), status, err)
+	log.Printf("%s %s %s %1.3f %d/%d %d %s", r.RemoteAddr, r.Method, r.URL, time.Since(starttime).Seconds(), 0, 0, status, err)
 }
 
 /*
@@ -255,27 +349,15 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 
 	defer r.Body.Close()
 
-	ips := strings.Split(conf.AllowedIP, ",")
 	ip := strings.Split(r.RemoteAddr, ":")
 	var allowed bool
-	for _, v := range ips {
+	for _, v := range allowedIP {
 		allowed = allowed || ip[0] == v
 	}
 
 	if !allowed {
 		return fmt.Errorf("Unauthorised access attempt")
 	}
-
-	// handle non ok urls gracefully
-	var validPath = regexp.MustCompile("^/([a-zA-Z0-9\\.-]+)/([-a-zA-Z0-9\\.]+)$")
-	//log.Printf("url: %v\n", r.URL.Path)
-	match := validPath.FindStringSubmatch(r.URL.Path)
-	if match == nil {
-		return fmt.Errorf("Invalid path")
-	}
-
-	mSlotAlias := match[1]
-	mKeyAlias := match[2]
 
 	body, _ := ioutil.ReadAll(r.Body)
 
@@ -285,10 +367,8 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 	if err != nil {
 		return
 	}
-	//log.Printf("req: %v\n", b)
 
 	data, err := base64.StdEncoding.DecodeString(b.Data)
-
 	if err != nil {
 		return
 	}
@@ -298,14 +378,13 @@ func handler(w http.ResponseWriter, r *http.Request) (err error) {
 	}
 
 	// Client auth
-	err = authClient(b.Sharedkey, mSlotAlias, mKeyAlias, b.Mech)
+	key := r.URL.Path
+	err = authClient(b.Sharedkey, key)
 	if err != nil {
 		return
 	}
 
-	key := keymap[mKeyAlias].handle
-
-	sig, err := operations[b.Function]([]byte(data), b, key)
+	sig, err := operations[b.Function]([]byte(data), b, keys[key])
 	if err != nil {
 		return
 	}
@@ -333,81 +412,38 @@ func statushandler(w http.ResponseWriter, r *http.Request) (err error) {
 }
 
 func HSMStatus() (err error) {
-	// signing expects a hash prefixed with the DER encoded oid for the hashfunction - this is for sha256
-	data := []byte{0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20}
-	data = append(data, RandStringBytesMaskImprSrc(40)...)
-	b := Request{Mech: "CKM_RSA_PKCS"}
-
-	for _, key := range keymap { // just use one of the keys
-		_, err = Sign(data, b, key.handle)
-		break
-	}
+	_, err = Sign(HSMStatusData, Request{Mech: "CKM_RSA_PKCS"}, keys["/"+haSlot+"/"+testkey])
 	return
 }
 
-// Make a random string - from http://stackoverflow.com/a/31832326
-func RandStringBytesMaskImprSrc(n int) []byte {
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
+func HSMStatus2() (err error) {
+	const call = " 1234 Call HSMStatus "
+	res := map[string]bool{}
+	tmpl := map[bool]string{false: ": - ", true: ": OK "}
+	tmpl2 := map[bool]string{false: "ERROR:", true: "OK:"}
+
+	for _, slot := range testslots {
+		var status bool
+		select {
+		case status = <-slot.channel:
+		default:
 		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
+		res[slot.site] = status
 	}
-
-	return b
-}
-
-func initpkcs11lib() {
-	/*
-		err := p.Initialize()
-		for err != nil {
-			log.Fatal("Failed to initialize pkcs11")
-		}
-	*/
-
-	for currentsessions := 0; currentsessions < conf.MaxSessions; currentsessions++ {
-		s, _ := initsession()
-		// need to call FindObjectsInit to be able to use objects in ha partition
-		template := []*pkcs11.Attribute{}
-		_ = p.FindObjectsInit(s.session, template)
-		sem <- s
+	ok := true
+	msg := ""
+	for _, slot := range testslots {
+		msg += slot.site + tmpl[res[slot.site]]
+		ok = ok && res[slot.site]
 	}
-
-	log.Printf("initialized goeleven %d sessions\n", conf.MaxSessions)
-}
-
-// TODO: Cleanup
-// TODO: Documentation
-func initsession() (Hsm, error) {
-
-	session, e := p.OpenSession(slot, pkcs11.CKF_SERIAL_SESSION)
-
-	if e != nil {
-		log.Fatalf("Failed to open session: %s\n", e.Error())
-	}
-
-	e = p.Login(session, crypto_user, conf.SlotPassword)
-//	e = p.Login(session, crypto_officer, conf.SlotPassword)
-
-	if e != nil {
-		log.Printf("Failed to login to session: %s\n", e.Error())
-		// panic(log.Sprintf("Failed to open session: %s\n", e.Error()))
-	}
-
-	return Hsm{session}, e
+	log.Println(tmpl2[ok] + call + msg)
+	return
 }
 
 func Dispatch(req string, params Request) (res []byte, err error) {
-    if p == nil {
-	    return nil, fmt.Errorf("goeleven not initialized")
-    }
+	if p == nil {
+		return nil, fmt.Errorf("goeleven not initialized")
+	}
 	u, err := url.Parse(req)
 	if err != nil {
 		return
@@ -416,27 +452,29 @@ func Dispatch(req string, params Request) (res []byte, err error) {
 	if err != nil {
 		return
 	}
-	key := keymap[strings.Split(u.Path, "/")[2]].handle
-	res, err = operations[params.Function](data, params, key)
+	fmt.Println(params, u.Path, keys[u.Path])
+	res, err = operations[params.Function](data, params, keys[u.Path])
 	return
 }
 
 // TODO: Cleanup
 // TODO: Documentation
-func Sign(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error) {
-	var err error
-	s := <-sem
-	defer func() { sem <- s }()
+func Sign(data []byte, parms Request, key keyInfo) (sig []byte, err error) {
+	session := <-sessions[key.slot]
+	defer func() { sessions[key.slot] <- session }()
 
-	err = p.SignInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key)
-	handlefatalerror(err)
-	sig, err := p.Sign(s.session, data)
-	handlefatalerror(err)
-
-	return sig, err
+	err = p.SignInit(session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], nil)}, key.handle)
+	if err != nil {
+		return
+	}
+	sig, err = p.Sign(session, data)
+	if err != nil {
+		return
+	}
+	return
 }
 
-func Encrypt(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error) {
+func Encrypt(data []byte, parms Request, key keyInfo) (ciphertext []byte, err error) {
 
 	type oaepParams struct {
 		hashAlg         uint
@@ -455,22 +493,21 @@ func Encrypt(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error
 	params.pSourceData = nil
 	params.ulSourceDataLen = 0
 
-	var err error
-	s := <-sem
-	defer func() { sem <- s }()
+	session := <-sessions[key.slot]
+	defer func() { sessions[key.slot] <- session }()
 
-	err = p.EncryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
+	err = p.EncryptInit(session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key.handle)
 	handlefatalerror(err)
-	plain, err := p.Encrypt(s.session, data)
+	ciphertext, err = p.Encrypt(session, data)
 	handlefatalerror(err)
 
-	return plain, err
+	return ciphertext, err
 }
 
 // TODO: Cleanup
 // TODO: Documentation
 
-func Decrypt(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error) {
+func Decrypt(data []byte, parms Request, key keyInfo) (plain []byte, err error) {
 
 	type oaepParams struct {
 		hashAlg         uint
@@ -484,18 +521,17 @@ func Decrypt(data []byte, parms Request, key pkcs11.ObjectHandle) ([]byte, error
 	params := (*oaepParams)(unsafe.Pointer(&buf[0]))
 
 	params.hashAlg = methods[parms.Digest]
-	params.mgf = map[uint]uint{pkcs11.CKM_SHA_1 : pkcs11.CKG_MGF1_SHA1, pkcs11.CKM_SHA256: pkcs11.CKG_MGF1_SHA256}[params.hashAlg]
+	params.mgf = map[uint]uint{pkcs11.CKM_SHA_1: pkcs11.CKG_MGF1_SHA1, pkcs11.CKM_SHA256: pkcs11.CKG_MGF1_SHA256}[params.hashAlg]
 	params.source = 1 // CKZ_DATA_SPECIFIED
 	params.pSourceData = nil
 	params.ulSourceDataLen = 0
 
-	var err error
-	s := <-sem
-	defer func() { sem <- s }()
+	session := <-sessions[key.slot]
+	defer func() { sessions[key.slot] <- session }()
 
-	err = p.DecryptInit(s.session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key)
+	err = p.DecryptInit(session, []*pkcs11.Mechanism{pkcs11.NewMechanism(methods[parms.Mech], buf)}, key.handle)
 	handlefatalerror(err)
-	plain, err := p.Decrypt(s.session, data)
+	plain, err = p.Decrypt(session, data)
 	handlefatalerror(err)
 	return plain, err
 }

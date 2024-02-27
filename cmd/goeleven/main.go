@@ -8,4 +8,7 @@ import (
 func main() {
 	config.Init()
 	goeleven.Init(config.GoElevenPHPH)
+	finish := make(chan bool)
+	<-finish
+
 }

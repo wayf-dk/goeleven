@@ -1,6 +1,6 @@
 module github.com/wayf-dk/goeleven
 
-go 1.22
+go 1.22.0
 
 require (
 	github.com/miekg/pkcs11 v1.1.1
@@ -8,8 +8,8 @@ require (
 )
 
 require (
-	golang.org/x/crypto v0.0.0-20210322153248-0c34fe9e7dc2 // indirect
-	golang.org/x/sys v0.0.0-20201119102817-f84b799fce68 // indirect
+	golang.org/x/crypto v0.20.0 // indirect
+	golang.org/x/sys v0.17.0 // indirect
 )
 
 replace x.config => ../hybrid-config

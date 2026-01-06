@@ -305,6 +305,7 @@ func handleTestslot(theslot testslot, conf config.GoElevenConfig) {
 		if err == nil {
 			_, err = p.Sign(theslot.session, HSMStatusData)
 			if err != nil {
+    			p.CloseSession(theslot.session)
 				theslot.session = pkcs11.CKR_SESSION_HANDLE_INVALID
 				continue
 			}

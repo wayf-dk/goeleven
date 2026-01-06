@@ -147,7 +147,7 @@ func Init(conf config.GoElevenConfig) {
 
 	//HSMStatus()
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	go func() {
 		for {
 			<-ticker.C
